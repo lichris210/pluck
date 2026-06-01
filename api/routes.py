@@ -112,6 +112,17 @@ async def extract_endpoint(
 
     async def stream():
         t0 = time.perf_counter()
+
+        # ── results cache check ───────────────────────────────────────────
+        _cached = _schema_cache.get_cached_result(url)
+        if _cached is not None:
+            payload = json.loads(_cached)
+            payload["total_time_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+            payload["from_cache"] = True
+            yield _sse({"step": "cache", "status": "hit"})
+            yield _sse(payload)
+            return
+
         yield _sse({"step": "classifying", "status": "active"})
 
         profile = await ingest(url)
@@ -213,7 +224,7 @@ async def extract_endpoint(
             if isinstance(item, dict):
                 columns.update(item.keys())
 
-        yield _sse({
+        _done = {
             "step": "done",
             "status": "done",
             "items": items,
@@ -225,6 +236,8 @@ async def extract_endpoint(
             "extraction_time_ms": extraction_time_ms,
             "total_time_ms": round((time.perf_counter() - t0) * 1000, 1),
             "model_used": model_used,
-        })
+        }
+        _schema_cache.put_cached_result(url, json.dumps(_done))
+        yield _sse(_done)
 
     return StreamingResponse(stream(), media_type="text/event-stream")
