@@ -105,6 +105,7 @@ async def extract_endpoint(
     prompt: str | None = Query(default=None),
     max_items: int = Query(default=100, ge=1, le=1000),
     force_apify: bool = Query(default=False),
+    refresh: bool = Query(default=False),
     token: str | None = Query(None),
     authorization: str | None = Header(default=None),
 ):
@@ -113,8 +114,8 @@ async def extract_endpoint(
     async def stream():
         t0 = time.perf_counter()
 
-        # ── results cache check ───────────────────────────────────────────
-        _cached = _schema_cache.get_cached_result(url)
+        # ── results cache check (skipped when refresh=true) ──────────────
+        _cached = None if refresh else _schema_cache.get_cached_result(url)
         if _cached is not None:
             payload = json.loads(_cached)
             payload["total_time_ms"] = round((time.perf_counter() - t0) * 1000, 1)
