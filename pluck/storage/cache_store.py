@@ -51,6 +51,15 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Bare (www-stripped) domains → default TTL seconds.
+# Keys must match _domain_for() output so _resolve_ttl() finds them.
+# Edit this dict to tune defaults; existing DB rows are never overwritten.
+_DEFAULT_DOMAIN_TTLS: dict[str, int] = {
+    "linkedin.com": 1800,
+    "stockx.com": 1800,
+}
+
+
 class SchemaCacheStore:
     """Data-access layer for schema_cache, results_cache, and domain_ttl tables.
 
@@ -74,6 +83,12 @@ class SchemaCacheStore:
         self._conn.execute(_CREATE_SCHEMA_CACHE)
         self._conn.execute(_CREATE_RESULTS_CACHE)
         self._conn.execute(_CREATE_DOMAIN_TTL)
+        for _domain, _ttl in _DEFAULT_DOMAIN_TTLS.items():
+            self._conn.execute(
+                "INSERT INTO domain_ttl (domain, ttl_seconds)"
+                " VALUES (?, ?) ON CONFLICT(domain) DO NOTHING",
+                (_domain, _ttl),
+            )
         self._conn.commit()
 
     # ── internal helpers ──────────────────────────────────────────────────────
