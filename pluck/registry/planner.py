@@ -43,7 +43,7 @@ DEFAULT_MODEL = "claude-haiku-4-5"
 _MAX_TOKENS = 1024
 
 # Actor-input keys that cap the number of returned rows. Clamped to the ceiling.
-_LIMIT_KEYS = ("maxItems", "resultsLimit", "max_items")
+_LIMIT_KEYS = ("maxItems", "resultsLimit", "max_items", "count", "maxItemsPerStartUrl")
 
 
 PLANNER_SYSTEM = (

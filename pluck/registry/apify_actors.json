@@ -32,12 +32,12 @@
     "intent_description": "List job postings from a LinkedIn Jobs search or collection URL. Returns one row per job with title, company, location, posting date, employment type, and a link to the listing.",
     "input_template": {
       "urls": ["{url}"],
-      "maxItems": "{max_items}"
+      "count": "{max_items}"
     },
-    "input_notes": "urls is an array even for a single URL. Pass a LinkedIn jobs search/collection URL, not an individual profile. maxItems caps the number of jobs returned.",
+    "input_notes": "urls is a plain string array (schema editor=stringList), even for a single URL. Pass a LinkedIn jobs search/collection URL, not an individual profile. The actor's item-count field is 'count' (integer), NOT maxItems. Columns are taken from a real jobs.csv export; the dotted columns (companyAddress.*, salaryInsights.*) are CSV flattenings of nested objects and will not populate via the top-level shaper, so default_columns are all functional top-level fields.",
     "row_unit": "job",
-    "default_columns": ["title", "companyName", "location", "postedTime", "employmentType", "jobUrl"],
-    "all_columns": ["id", "title", "companyName", "companyId", "companyUrl", "location", "postedTime", "jobUrl", "employmentType", "seniorityLevel", "jobFunction", "industries", "description", "applicantsCount", "salary", "workType"],
+    "default_columns": ["title", "companyName", "location", "postedAt", "employmentType", "seniorityLevel", "salary", "link"],
+    "all_columns": ["id", "trackingId", "refId", "link", "title", "companyName", "companyLinkedinUrl", "companyLogo", "location", "postedAt", "benefits", "descriptionHtml", "applicantsCount", "applyUrl", "salary", "descriptionText", "seniorityLevel", "employmentType", "jobFunction", "industries", "inputUrl", "applyMethod", "expireAt", "postedAtTimestamp", "workplaceTypes", "workRemoteAllowed", "standardizedTitle", "country", "companyAddress.type", "companyAddress.streetAddress", "companyAddress.addressLocality", "companyAddress.addressRegion", "companyAddress.postalCode", "companyAddress.addressCountry", "companyWebsite", "companySlogan", "companyDescription", "companyEmployeesCount", "salaryInsights.compensationBreakdown", "salaryInsights.compensationSource", "jobPosterName", "jobPosterTitle", "jobPosterPhoto", "jobPosterProfileUrl"],
     "is_default": true
   },
   {
@@ -45,13 +45,13 @@
     "actor_id": "junglee/amazon-crawler",
     "intent_description": "Scrape Amazon product listings from a search, category, or product URL. Returns one row per product with title, brand, price, rating, review count, and a link to the product page.",
     "input_template": {
-      "startUrls": [{"url": "{url}"}],
-      "maxItems": "{max_items}"
+      "categoryOrProductUrls": [{"url": "{url}"}],
+      "maxItemsPerStartUrl": "{max_items}"
     },
-    "input_notes": "startUrls is an array of {\"url\": ...} objects, not plain strings. maxItems caps the number of products returned.",
+    "input_notes": "Required field is categoryOrProductUrls (schema editor=requestListSources): an array of {\"url\": ...} objects, NOT plain strings and NOT startUrls. The per-start-URL cap is maxItemsPerStartUrl (integer). Columns are the real top-level keys from a captured sample row; nested fields are kept top-level rather than flattened with dotted paths because the shaper projects by top-level key only (starsBreakdown/visitStoreLink/aiReviewsSummary are dicts; attributes/productOverview/productPageReviews are lists of objects). Note price/listPrice/seller can be null for some products.",
     "row_unit": "product",
-    "default_columns": ["title", "brand", "price", "stars", "reviewsCount", "url"],
-    "all_columns": ["asin", "title", "brand", "price", "listPrice", "stars", "reviewsCount", "url", "thumbnailImage", "images", "description", "features", "availability", "categories", "seller"],
+    "default_columns": ["title", "brand", "price", "stars", "reviewsCount", "asin", "url", "inStock"],
+    "all_columns": ["title", "url", "asin", "originalAsin", "price", "inStock", "inStockText", "listPrice", "brand", "author", "shippingPrice", "stars", "starsBreakdown", "reviewsCount", "answeredQuestions", "breadCrumbs", "videosCount", "visitStoreLink", "thumbnailImage", "galleryThumbnails", "highResolutionImages", "importantInformation", "sustainabilityFeatures", "description", "features", "attributes", "productOverview", "variantAsins", "variantDetails", "reviewsLink", "hasReviews", "delivery", "fastestDelivery", "condition", "returnPolicy", "support", "variantAttributes", "manufacturerAttributes", "seller", "bestsellerRanks", "isAmazonChoice", "amazonChoiceText", "bookDescription", "priceRange", "aPlusContent", "brandStory", "productComparison", "aiReviewsSummary", "monthlyPurchaseVolume", "productPageReviews", "productPageReviewsFromOtherCountries", "locationText", "loadedCountryCode", "offers", "unNormalizedProductUrl"],
     "is_default": true
   }
 ]
