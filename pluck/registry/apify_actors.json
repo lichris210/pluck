@@ -1,0 +1,57 @@
+[
+  {
+    "domain_patterns": ["instagram.com", "www.instagram.com"],
+    "actor_id": "apify/instagram-post-scraper",
+    "intent_description": "List posts from an Instagram profile, hashtag, or location URL. Returns one row per post with caption, engagement counts, timestamp, media URLs, hashtags, and mentions.",
+    "input_template": {
+      "username": ["{username}"],
+      "resultsLimit": "{max_items}"
+    },
+    "input_notes": "username is an array of handles (or profile URLs) even for a single account — extract the handle from the URL path before passing. resultsLimit caps post count (default 50, hard ceiling around 1000 per Apify docs).",
+    "row_unit": "post",
+    "default_columns": ["timestamp", "type", "caption", "likesCount", "commentsCount", "hashtags", "url"],
+    "all_columns": ["id", "type", "shortCode", "caption", "hashtags", "mentions", "url", "commentsCount", "likesCount", "videoViewCount", "timestamp", "ownerUsername", "displayUrl", "videoUrl", "isPinned"],
+    "is_default": true
+  },
+  {
+    "domain_patterns": ["instagram.com", "www.instagram.com"],
+    "actor_id": "apify/instagram-profile-scraper",
+    "intent_description": "Get profile-level info for one or more Instagram accounts: bio, follower count, post count, profile picture, verification status. Returns one row per profile. Recent posts come nested inside latestPosts and should not be flattened by default.",
+    "input_template": {
+      "usernames": ["{username}"]
+    },
+    "input_notes": "Takes usernames (plain strings), not URLs. Extract the username from the URL path before passing. usernames is an array even for a single account.",
+    "row_unit": "profile",
+    "default_columns": ["username", "fullName", "biography", "followersCount", "followsCount", "postsCount", "verified", "profilePicUrl"],
+    "all_columns": ["username", "id", "fullName", "biography", "followersCount", "followsCount", "postsCount", "verified", "private", "profilePicUrl", "externalUrl", "businessCategory", "latestPosts"],
+    "is_default": false
+  },
+  {
+    "domain_patterns": ["linkedin.com", "www.linkedin.com"],
+    "actor_id": "curious_coder/linkedin-jobs-scraper",
+    "intent_description": "List job postings from a LinkedIn Jobs search or collection URL. Returns one row per job with title, company, location, posting date, employment type, and a link to the listing.",
+    "input_template": {
+      "urls": ["{url}"],
+      "maxItems": "{max_items}"
+    },
+    "input_notes": "urls is an array even for a single URL. Pass a LinkedIn jobs search/collection URL, not an individual profile. maxItems caps the number of jobs returned.",
+    "row_unit": "job",
+    "default_columns": ["title", "companyName", "location", "postedTime", "employmentType", "jobUrl"],
+    "all_columns": ["id", "title", "companyName", "companyId", "companyUrl", "location", "postedTime", "jobUrl", "employmentType", "seniorityLevel", "jobFunction", "industries", "description", "applicantsCount", "salary", "workType"],
+    "is_default": true
+  },
+  {
+    "domain_patterns": ["amazon.com", "www.amazon.com"],
+    "actor_id": "junglee/amazon-crawler",
+    "intent_description": "Scrape Amazon product listings from a search, category, or product URL. Returns one row per product with title, brand, price, rating, review count, and a link to the product page.",
+    "input_template": {
+      "startUrls": [{"url": "{url}"}],
+      "maxItems": "{max_items}"
+    },
+    "input_notes": "startUrls is an array of {\"url\": ...} objects, not plain strings. maxItems caps the number of products returned.",
+    "row_unit": "product",
+    "default_columns": ["title", "brand", "price", "stars", "reviewsCount", "url"],
+    "all_columns": ["asin", "title", "brand", "price", "listPrice", "stars", "reviewsCount", "url", "thumbnailImage", "images", "description", "features", "availability", "categories", "seller"],
+    "is_default": true
+  }
+]

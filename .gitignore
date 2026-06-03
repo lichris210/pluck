@@ -1,0 +1,39 @@
+# Secrets
+.env
+
+# Virtual environment
+.venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local databases / WAL files
+*.db
+*.db-shm
+*.db-wal
+
+# Node / frontend build
+node_modules/
+frontend/dist/
+
+# OS / editor
+.DS_Store
+
+# Vendored third-party source (kept locally for reference, not published)
+scrapling_src/
+
+# Scraped sample data (may contain personal data)
+/jobs.csv
+/hn.csv
+/hn.json
+
+# Scratch / exploration scripts
+/fix.py
+/explore_apify.py
+/explore_scrapling.py
+/smoke_stealth_pypi.py
+
+# Build scratch
+phase1_prompts/phase1_split.zip

@@ -1,6 +1,8 @@
+import hashlib
 import json
 import os
 import time
+from urllib.parse import urlparse
 
 import anthropic
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -14,6 +16,8 @@ from pluck.extraction.extractor import extract
 from pluck.fetchers.router import fetch as route_fetch
 from pluck.ingester import ingest
 from pluck.models import ExtractionSchema, SiteGroup
+from pluck.registry.loader import candidates_for_url
+from pluck.registry.planner import plan_extraction
 from pluck.storage.cache_store import SchemaCacheStore
 
 _schema_cache = SchemaCacheStore()
@@ -58,6 +62,26 @@ async def classify_endpoint(body: ClassifyRequest, _token: str = Depends(require
         "response_time_ms": profile.response_time_ms,
         "error": profile.error,
     }
+
+
+_PLANNER_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _planner_enabled() -> bool:
+    return (os.environ.get("USE_PLANNER") or "").strip().lower() in _PLANNER_TRUTHY
+
+
+def _planned_cache_key(url: str, prompt: str | None) -> str:
+    """Results-cache key for the planned path: URL plus a prompt hash.
+
+    The planner shapes output from the prompt, so the same URL with a different
+    prompt must not serve a stale shaped result (plan gotcha 3). Appended as a
+    query param because ``results_key`` keeps (and sorts) the query but drops the
+    fragment.
+    """
+    digest = hashlib.sha256((prompt or "").encode("utf-8")).hexdigest()[:16]
+    sep = "&" if urlparse(url).query else "?"
+    return f"{url}{sep}_pluck_phash={digest}"
 
 
 def _sse(payload: dict) -> str:
@@ -114,8 +138,17 @@ async def extract_endpoint(
     async def stream():
         t0 = time.perf_counter()
 
+        # ── planner gate: registry host + USE_PLANNER forces the Apify branch
+        # (plan gotcha 2) regardless of how the host would otherwise classify.
+        candidates = candidates_for_url(url) if _planner_enabled() else []
+        planned_path = bool(candidates)
+
+        # The planned path shapes output from the prompt, so its results cache
+        # key folds in a prompt hash (plan gotcha 3); the legacy path is unchanged.
+        cache_key = _planned_cache_key(url, prompt) if planned_path else url
+
         # ── results cache check (skipped when refresh=true) ──────────────
-        _cached = None if refresh else _schema_cache.get_cached_result(url)
+        _cached = None if refresh else _schema_cache.get_cached_result(cache_key)
         if _cached is not None:
             payload = json.loads(_cached)
             payload["total_time_ms"] = round((time.perf_counter() - t0) * 1000, 1)
@@ -138,10 +171,34 @@ async def extract_endpoint(
             "site_group_number": profile.site_group.value,
         })
 
-        fetcher_label = _FETCHER_LABELS.get(profile.site_group, "scrapling_static")
+        # ── intent-aware planner (registry hosts only, behind USE_PLANNER) ──
+        plan = None
+        planner_cost = 0.0
+        if planned_path:
+            yield _sse({"step": "planning", "status": "active"})
+            tracker = _UsageTrackingClient(
+                anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+            )
+            plan = plan_extraction(url, prompt or "", max_items, candidates, tracker)
+            planner_cost = _token_cost(tracker.input_tokens, tracker.output_tokens)
+            yield _sse({
+                "step": "planning",
+                "status": "done",
+                "actor_id": plan.get("actor_id"),
+                "reasoning": plan.get("reasoning", ""),
+            })
+
+        fetcher_label = "apify" if planned_path else _FETCHER_LABELS.get(
+            profile.site_group, "scrapling_static"
+        )
         yield _sse({"step": "fetching", "status": "active", "fetcher": fetcher_label})
 
-        fetch_result = await route_fetch(profile, use_apify=force_apify, max_items=max_items)
+        fetch_result = await route_fetch(
+            profile,
+            use_apify=force_apify or planned_path,
+            max_items=max_items,
+            plan=plan,
+        )
         if not fetch_result.success:
             yield _sse({"step": "fetching", "status": "error", "error": fetch_result.error or "Fetch failed"})
             return
@@ -180,19 +237,20 @@ async def extract_endpoint(
 
         if fetch_result.skip_extraction:
             items = fetch_result.structured_data or []
-            cost_usd = round(apify_cost, 6)
+            cost_usd = round(apify_cost + planner_cost, 6)
             extraction_time_ms = 0.0
             model_used = "none"
         else:
             items = extraction_result.items if extraction_result else []
             haiku_cost = _estimate_cost(extraction_result) if extraction_result else 0.0
-            cost_usd = round(haiku_cost + apify_cost, 6)
+            cost_usd = round(haiku_cost + apify_cost + planner_cost, 6)
             extraction_time_ms = extraction_result.extraction_time_ms if extraction_result else 0.0
             model_used = extraction_result.model_used if extraction_result else ""
 
-        # ── optional prompt-driven column selection (one extra Haiku call)
+        # ── optional prompt-driven column selection (one extra Haiku call) ──
+        # Skipped on the planned path: the plan's output_shape already chose columns.
         keep_columns = None
-        if prompt:
+        if prompt and not planned_path:
             col_list: list[str] = []
             sample_row: dict = {}
             for item in items:
@@ -238,7 +296,7 @@ async def extract_endpoint(
             "total_time_ms": round((time.perf_counter() - t0) * 1000, 1),
             "model_used": model_used,
         }
-        _schema_cache.put_cached_result(url, json.dumps(_done))
+        _schema_cache.put_cached_result(cache_key, json.dumps(_done))
         yield _sse(_done)
 
     return StreamingResponse(stream(), media_type="text/event-stream")

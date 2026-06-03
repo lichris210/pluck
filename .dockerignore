@@ -1,0 +1,13 @@
+.venv
+__pycache__
+.pytest_cache
+*.pyc
+.env
+frontend/node_modules
+scrapling_src
+apify_src
+apify_sdk_src
+*.db
+hn.json
+hn.csv
+smoke_stealth_pypi.py

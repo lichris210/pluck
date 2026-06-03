@@ -1,0 +1,7 @@
+scrapling[all]
+apify-client
+anthropic
+beautifulsoup4
+lxml
+python-dotenv
+httpx
