@@ -37,3 +37,9 @@ scrapling_src/
 
 # Build scratch
 phase1_prompts/phase1_split.zip
+
+# Prompt-scaffolding files (kept locally for reference, not published)
+meta_prompts/
+phase2_prompts/
+phase3_prompts/
+cleanup_prompt.md
