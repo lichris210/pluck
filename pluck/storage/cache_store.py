@@ -4,6 +4,7 @@ DB file: pluck_cache.db, placed at the project root (next to pluck_adaptive.db).
 Path is derived from __file__ at import time — Windows-compatible absolute path.
 """
 
+import json
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ DEFAULT_DB_PATH = os.path.join(_PROJECT_ROOT, "pluck_cache.db")
 
 DEFAULT_TTL_SECONDS = 3600  # 1 hour
 PLAN_CACHE_TTL_SECONDS = 7 * 24 * 3600  # 7 days
+DISCOVERED_ACTOR_TTL_SECONDS = 30 * 24 * 3600  # 30 days
 
 # ── DDL ───────────────────────────────────────────────────────────────────────
 
@@ -54,6 +56,21 @@ CREATE TABLE IF NOT EXISTS plan_cache (
     created_at   TEXT NOT NULL,
     last_used_at TEXT NOT NULL,
     use_count    INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_CREATE_DISCOVERED_ACTORS = """
+CREATE TABLE IF NOT EXISTS discovered_actors (
+    domain_pattern  TEXT NOT NULL,
+    actor_id        TEXT NOT NULL,
+    entry_json      TEXT NOT NULL,
+    source          TEXT NOT NULL DEFAULT 'discovered'
+        CHECK(source IN ('discovered', 'hardcoded')),
+    successful_runs INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    last_used_at    TEXT NOT NULL,
+    use_count       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (domain_pattern, actor_id)
 );
 """
 
@@ -95,6 +112,7 @@ class SchemaCacheStore:
         self._conn.execute(_CREATE_RESULTS_CACHE)
         self._conn.execute(_CREATE_DOMAIN_TTL)
         self._conn.execute(_CREATE_PLAN_CACHE)
+        self._conn.execute(_CREATE_DISCOVERED_ACTORS)
         for _domain, _ttl in _DEFAULT_DOMAIN_TTLS.items():
             self._conn.execute(
                 "INSERT INTO domain_ttl (domain, ttl_seconds)"
@@ -278,6 +296,111 @@ class SchemaCacheStore:
     def clear_plan_cache(self) -> int:
         """Delete all cached plans; return the number of rows removed."""
         cur = self._conn.execute("DELETE FROM plan_cache")
+        self._conn.commit()
+        return cur.rowcount
+
+    # ── discovered_actors (tier 2) ────────────────────────────────────────────
+
+    def get_discovered(self, domain_pattern: str) -> list[dict]:
+        """Return non-expired discovered entries for *domain_pattern* as dicts.
+
+        Bumps last_used_at/use_count on each returned row. Each dict is the stored
+        registry entry with ``successful_runs`` folded in (for confidence scoring).
+        """
+        rows = self._conn.execute(
+            """
+            SELECT actor_id, entry_json, successful_runs, created_at
+              FROM discovered_actors
+             WHERE domain_pattern = ?
+            """,
+            (domain_pattern,),
+        ).fetchall()
+
+        now = self._clock()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+
+        out: list[dict] = []
+        fresh_ids: list[str] = []
+        for row in rows:
+            created_at = datetime.fromisoformat(row["created_at"])
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            if (now - created_at).total_seconds() >= DISCOVERED_ACTOR_TTL_SECONDS:
+                continue
+            entry = json.loads(row["entry_json"])
+            entry["successful_runs"] = row["successful_runs"]
+            out.append(entry)
+            fresh_ids.append(row["actor_id"])
+
+        if fresh_ids:
+            now_str = self._now_str()
+            self._conn.executemany(
+                """
+                UPDATE discovered_actors
+                   SET last_used_at = ?, use_count = use_count + 1
+                 WHERE domain_pattern = ? AND actor_id = ?
+                """,
+                [(now_str, domain_pattern, aid) for aid in fresh_ids],
+            )
+            self._conn.commit()
+        return out
+
+    def put_discovered(self, domain_pattern: str, entry: dict) -> None:
+        """Upsert a discovered entry by (domain_pattern, actor_id).
+
+        On conflict, refreshes entry_json/created_at but preserves successful_runs
+        and use_count (the counter survives re-discovery).
+        """
+        now = self._now_str()
+        actor_id = entry.get("actor_id")
+        self._conn.execute(
+            """
+            INSERT INTO discovered_actors
+                (domain_pattern, actor_id, entry_json, source,
+                 successful_runs, created_at, last_used_at, use_count)
+            VALUES (?, ?, ?, 'discovered', 0, ?, ?, 0)
+            ON CONFLICT(domain_pattern, actor_id) DO UPDATE SET
+                entry_json = excluded.entry_json,
+                created_at = excluded.created_at,
+                last_used_at = excluded.last_used_at
+            """,
+            (domain_pattern, actor_id, json.dumps(entry), now, now),
+        )
+        self._conn.commit()
+
+    def increment_successful_runs(self, domain_pattern: str, actor_id: str) -> None:
+        """Bump the successful_runs counter for a discovered entry."""
+        self._conn.execute(
+            """
+            UPDATE discovered_actors
+               SET successful_runs = successful_runs + 1
+             WHERE domain_pattern = ? AND actor_id = ?
+            """,
+            (domain_pattern, actor_id),
+        )
+        self._conn.commit()
+
+    def get_discovered_for_review(self, min_runs: int = 10) -> list[dict]:
+        """Return all discovered rows with successful_runs >= *min_runs*.
+
+        Each dict carries domain_pattern, actor_id, successful_runs, source — the
+        manual-promotion report (Decision 3); no auto-promotion happens here.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT domain_pattern, actor_id, successful_runs, source
+              FROM discovered_actors
+             WHERE successful_runs >= ?
+             ORDER BY successful_runs DESC
+            """,
+            (min_runs,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def clear_discovered(self) -> int:
+        """Delete all discovered entries; return the number of rows removed."""
+        cur = self._conn.execute("DELETE FROM discovered_actors")
         self._conn.commit()
         return cur.rowcount
 
