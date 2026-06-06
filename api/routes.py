@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 import time
 from urllib.parse import urlparse
@@ -16,11 +17,20 @@ from pluck.extraction.extractor import extract
 from pluck.fetchers.router import fetch as route_fetch
 from pluck.ingester import ingest
 from pluck.models import ExtractionSchema, SiteGroup
-from pluck.registry.loader import candidates_for_url
+from pluck.registry.discovery_filter import filter_candidates
+from pluck.registry.discovery_planner import (
+    apply_captured_schema,
+    capture_output_schema,
+    discover_actor,
+)
+from pluck.registry.loader import candidates_for_url, find_entry
 from pluck.registry.planner import plan_extraction
+from pluck.registry.store_api import build_search_query, search_store
 from pluck.storage.cache_store import SchemaCacheStore
 
 _schema_cache = SchemaCacheStore()
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -104,6 +114,23 @@ def _plan_cache_key(url: str, prompt: str | None) -> str:
         host = host[4:]
     phash = hashlib.sha256((prompt or "").encode("utf-8")).hexdigest()[:16]
     return f"{host}|{phash}"
+
+
+def _discovery_host(url: str) -> str:
+    """Normalised host (lowercase, no www.) — the tier-2 cache's domain_pattern key."""
+    host = (urlparse(url).hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def _discovery_confidence(successful_runs: int) -> str:
+    """Decision 4 confidence band from a discovered actor's run count."""
+    if successful_runs >= 10:
+        return "high"
+    if successful_runs >= 1:
+        return "medium"
+    return "low"
 
 
 def _sse(payload: dict) -> str:
@@ -193,9 +220,51 @@ async def extract_endpoint(
             "site_group_number": profile.site_group.value,
         })
 
-        # ── intent-aware planner (registry hosts only, behind USE_PLANNER) ──
+        # ── discovery fall-through: planner on, but no tier-1/tier-2 candidate ──
+        # Search the Apify Store, rank with Haiku, capture the real schema, and cache
+        # the winner in tier 2 so future requests for this host skip discovery (they
+        # arrive here already planned via the loader union). Never crashes the request:
+        # on no-result or error we fall back to the legacy non-planned path.
         plan = None
         planner_cost = 0.0
+        if not planned_path and _planner_enabled():
+            yield _sse({"step": "discovery", "status": "active"})
+            disc_client = _UsageTrackingClient(
+                anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+            )
+            entry = None
+            try:
+                query = build_search_query(url)
+                store_items = await search_store(query)
+                cands = filter_candidates(store_items)
+                entry = discover_actor(url, prompt or "", cands, disc_client)
+            except Exception as exc:
+                logger.warning("Discovery failed for %s: %s", url, exc)
+                entry = None
+            planner_cost += _token_cost(
+                disc_client.input_tokens, disc_client.output_tokens
+            )
+
+            if entry is not None:
+                apify_token = os.environ.get("APIFY_TOKEN")
+                if apify_token:
+                    columns = await capture_output_schema(entry, apify_token, url)
+                    entry = apply_captured_schema(entry, columns)
+                host = _discovery_host(url)
+                _schema_cache.put_discovered(host, entry)
+                candidates = [entry]
+                planned_path = True
+                cache_key = _planned_cache_key(url, prompt)
+                runs = entry.get("successful_runs", 0)
+                yield _sse({
+                    "step": "discovery",
+                    "actor_id": entry["actor_id"],
+                    "reasoning": entry.get("reasoning", ""),
+                    "source": "discovered",
+                    "confidence": _discovery_confidence(runs),
+                })
+
+        # ── intent-aware planner (registry hosts only, behind USE_PLANNER) ──
         if planned_path:
             yield _sse({"step": "planning", "status": "active"})
 
@@ -238,6 +307,15 @@ async def extract_endpoint(
             return
 
         yield _sse({"step": "fetching", "status": "done", "html_length": len(fetch_result.html)})
+
+        # Decision 3: a successful scrape on a discovered (tier-2) actor bumps its
+        # successful_runs counter — the signal the review CLI uses for promotion.
+        if planned_path and plan:
+            chosen = find_entry(plan.get("actor_id"), candidates)
+            if chosen and chosen.get("source") == "discovered":
+                _schema_cache.increment_successful_runs(
+                    _discovery_host(url), plan["actor_id"]
+                )
 
         extraction_result = None
         if not fetch_result.skip_extraction:
