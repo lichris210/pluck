@@ -53,5 +53,36 @@
     "default_columns": ["title", "brand", "price", "stars", "reviewsCount", "asin", "url", "inStock"],
     "all_columns": ["title", "url", "asin", "originalAsin", "price", "inStock", "inStockText", "listPrice", "brand", "author", "shippingPrice", "stars", "starsBreakdown", "reviewsCount", "answeredQuestions", "breadCrumbs", "videosCount", "visitStoreLink", "thumbnailImage", "galleryThumbnails", "highResolutionImages", "importantInformation", "sustainabilityFeatures", "description", "features", "attributes", "productOverview", "variantAsins", "variantDetails", "reviewsLink", "hasReviews", "delivery", "fastestDelivery", "condition", "returnPolicy", "support", "variantAttributes", "manufacturerAttributes", "seller", "bestsellerRanks", "isAmazonChoice", "amazonChoiceText", "bookDescription", "priceRange", "aPlusContent", "brandStory", "productComparison", "aiReviewsSummary", "monthlyPurchaseVolume", "productPageReviews", "productPageReviewsFromOtherCountries", "locationText", "loadedCountryCode", "offers", "unNormalizedProductUrl"],
     "is_default": true
+  },
+  {
+    "domain_patterns": ["youtube.com", "www.youtube.com"],
+    "actor_id": "streamers/youtube-scraper",
+    "intent_description": "List videos from a YouTube channel, playlist, or search URL. Returns one row per video with title, view count, like count, upload date, duration, channel info, and a link to the video.",
+    "input_template": {
+      "startUrls": [{"url": "{url}"}],
+      "maxResults": "{max_items}"
+    },
+    "input_notes": "startUrls is an array of {\"url\": ...} objects (editor=requestListSources). The video-count cap is maxResults (integer); maxResultsShorts and maxResultStreams cap shorts and streams separately. No required fields and no proxy. Columns are the real top-level keys from a captured sample row.",
+    "row_unit": "video",
+    "limit_field": "maxResults",
+    "default_columns": ["title", "url", "viewCount", "likes", "date", "duration", "channelName", "commentsCount"],
+    "all_columns": ["title", "translatedTitle", "type", "id", "url", "thumbnailUrl", "viewCount", "date", "likes", "location", "channelName", "channelUrl", "channelUsername", "collaborators", "channelId", "channelDescription", "channelJoinedDate", "channelDescriptionLinks", "channelLocation", "channelAvatarUrl", "channelBannerUrl", "channelTotalVideos", "channelTotalViews", "numberOfSubscribers", "isChannelVerified", "inputChannelUrl", "isAgeRestricted", "aboutChannelInfo", "duration", "commentsCount", "text", "translatedText", "descriptionLinks", "subtitles", "order", "commentsTurnedOff", "fromYTUrl", "isMonetized", "hashtags", "isMembersOnly", "input", "fromChannelListPage", "isPaidContent"],
+    "is_default": true
+  },
+  {
+    "domain_patterns": ["reddit.com", "www.reddit.com"],
+    "actor_id": "trudax/reddit-scraper-lite",
+    "intent_description": "Scrape posts from a Reddit subreddit, user, or search URL. Returns one row per post with title, author, community, body text, timestamp, and a link to the post.",
+    "input_template": {
+      "startUrls": [{"url": "{url}"}],
+      "maxItems": "{max_items}",
+      "proxy": {"useApifyProxy": true}
+    },
+    "input_notes": "startUrls is an array of {\"url\": ...} objects (editor=requestListSources). proxy is REQUIRED (editor=proxy); use {\"useApifyProxy\": true}. The total-item cap is maxItems (integer). The actor enforces a minimum cost per run, so max_items below ~10-15 fails with a start-cost error — keep max_items at 15+ for this host. Output mixes dataType community/post/comment rows. Columns are the real top-level keys from captured sample rows.",
+    "row_unit": "post",
+    "limit_field": "maxItems",
+    "default_columns": ["title", "url", "username", "communityName", "body", "createdAt", "dataType"],
+    "all_columns": ["url", "dataType", "title", "createdAt", "scrapedAt", "id", "parsedId", "username", "communityName", "parsedCommunityName", "body", "html", "category", "postId"],
+    "is_default": true
   }
 ]

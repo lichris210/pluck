@@ -30,14 +30,22 @@ def registry():
         return json.load(fh)
 
 
-def test_registry_parses_and_has_four_entries(registry):
+def test_registry_parses_and_has_six_entries(registry):
     assert isinstance(registry, list)
-    assert len(registry) == 4
+    # 4 original (Instagram x2, LinkedIn, Amazon) + 2 added (YouTube, Reddit).
+    assert len(registry) == 6
+
+
+# Optional keys an entry may carry beyond REQUIRED_KEYS (e.g. the limit-field name).
+OPTIONAL_KEYS = {"limit_field"}
 
 
 def test_every_entry_has_required_keys(registry):
     for entry in registry:
-        assert REQUIRED_KEYS == set(entry.keys()), f"key mismatch in {entry.get('actor_id')!r}"
+        keys = set(entry.keys())
+        assert REQUIRED_KEYS <= keys, f"missing required keys in {entry.get('actor_id')!r}"
+        extra = keys - REQUIRED_KEYS - OPTIONAL_KEYS
+        assert not extra, f"unexpected keys in {entry.get('actor_id')!r}: {extra}"
 
 
 def test_exactly_one_default_per_domain(registry):
