@@ -16,6 +16,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(_HERE))     # project root
 DEFAULT_DB_PATH = os.path.join(_PROJECT_ROOT, "pluck_cache.db")
 
 DEFAULT_TTL_SECONDS = 3600  # 1 hour
+PLAN_CACHE_TTL_SECONDS = 7 * 24 * 3600  # 7 days
 
 # ── DDL ───────────────────────────────────────────────────────────────────────
 
@@ -43,6 +44,16 @@ _CREATE_DOMAIN_TTL = """
 CREATE TABLE IF NOT EXISTS domain_ttl (
     domain      TEXT PRIMARY KEY,
     ttl_seconds INTEGER NOT NULL
+);
+"""
+
+_CREATE_PLAN_CACHE = """
+CREATE TABLE IF NOT EXISTS plan_cache (
+    cache_key    TEXT PRIMARY KEY,
+    plan_json    TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    last_used_at TEXT NOT NULL,
+    use_count    INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -83,6 +94,7 @@ class SchemaCacheStore:
         self._conn.execute(_CREATE_SCHEMA_CACHE)
         self._conn.execute(_CREATE_RESULTS_CACHE)
         self._conn.execute(_CREATE_DOMAIN_TTL)
+        self._conn.execute(_CREATE_PLAN_CACHE)
         for _domain, _ttl in _DEFAULT_DOMAIN_TTLS.items():
             self._conn.execute(
                 "INSERT INTO domain_ttl (domain, ttl_seconds)"
@@ -205,6 +217,69 @@ class SchemaCacheStore:
             (key, result_json, self._now_str()),
         )
         self._conn.commit()
+
+    # ── plan_cache ────────────────────────────────────────────────────────────
+
+    def get_plan(self, cache_key: str) -> str | None:
+        """Return cached plan_json for *cache_key* if within the 7-day TTL, else None.
+
+        On a fresh hit, bumps last_used_at and use_count (mirrors touch_schema).
+        The TTL is the module-level PLAN_CACHE_TTL_SECONDS — not per-domain.
+        """
+        row = self._conn.execute(
+            "SELECT plan_json, created_at FROM plan_cache WHERE cache_key = ?",
+            (cache_key,),
+        ).fetchone()
+        if row is None:
+            return None
+
+        created_at = datetime.fromisoformat(row["created_at"])
+        now = self._clock()
+        # Ensure both sides are timezone-aware for safe subtraction
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+
+        age_seconds = (now - created_at).total_seconds()
+        if age_seconds >= PLAN_CACHE_TTL_SECONDS:
+            return None
+
+        self._conn.execute(
+            """
+            UPDATE plan_cache
+               SET last_used_at = ?,
+                   use_count    = use_count + 1
+             WHERE cache_key = ?
+            """,
+            (self._now_str(), cache_key),
+        )
+        self._conn.commit()
+        return row["plan_json"]
+
+    def put_plan(self, cache_key: str, plan_json: str) -> None:
+        """Insert or replace the cached plan for *cache_key*, resetting use_count."""
+        now = self._now_str()
+        self._conn.execute(
+            """
+            INSERT INTO plan_cache
+                (cache_key, plan_json, created_at, last_used_at, use_count)
+            VALUES (?, ?, ?, ?, 0)
+            ON CONFLICT(cache_key) DO UPDATE SET
+                plan_json    = excluded.plan_json,
+                created_at   = excluded.created_at,
+                last_used_at = excluded.last_used_at,
+                use_count    = 0
+            """,
+            (cache_key, plan_json, now, now),
+        )
+        self._conn.commit()
+
+    def clear_plan_cache(self) -> int:
+        """Delete all cached plans; return the number of rows removed."""
+        cur = self._conn.execute("DELETE FROM plan_cache")
+        self._conn.commit()
+        return cur.rowcount
 
     # ── domain_ttl ────────────────────────────────────────────────────────────
 
