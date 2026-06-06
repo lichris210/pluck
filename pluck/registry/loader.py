@@ -56,15 +56,27 @@ def get_candidates(host: str, store=None) -> list[dict]:
     """Return the union of tier 1 (hardcoded JSON) and tier 2 (discovered SQLite).
 
     *host* is expected to be already normalized (lowercase, no ``www.``). Tier-2
-    entries are read live from *store* (default: the shared singleton); on any
-    error tier 2 is skipped so tier-1 routing never breaks. De-duped by actor_id
-    with tier 1 winning on conflict.
+    entries are read live from *store* (default: the shared singleton), filtered to
+    the current DISCOVERY_LOGIC_VERSION so entries from an older discovery flow are
+    ignored. On any error tier 2 is skipped so tier-1 routing never breaks. De-duped
+    by actor_id with tier 1 winning on conflict. Each loaded entry's ``limit_field``
+    is re-registered so the planner clamp works after a process restart.
+
+    Imports of discovery_planner/planner are lazy to avoid an import cycle
+    (loader → discovery_planner → planner → loader).
     """
     tier1 = _tier1_candidates(host)
 
     try:
+        from pluck.registry.discovery_planner import DISCOVERY_LOGIC_VERSION
+        from pluck.registry.planner import register_limit_key
+
         store = store if store is not None else _get_store()
-        tier2 = store.get_discovered(host)
+        tier2 = store.get_discovered(host, min_logic_version=DISCOVERY_LOGIC_VERSION)
+        for entry in tier2:
+            limit_field = entry.get("limit_field")
+            if limit_field:
+                register_limit_key(limit_field)
     except Exception:  # missing store, DB error — tier 1 must still work
         tier2 = []
 

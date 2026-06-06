@@ -45,6 +45,22 @@ _MAX_TOKENS = 1024
 # Actor-input keys that cap the number of returned rows. Clamped to the ceiling.
 _LIMIT_KEYS = ("maxItems", "resultsLimit", "max_items", "count", "maxItemsPerStartUrl")
 
+# Limit-field names discovered at runtime from real actor input schemas (Issue 2).
+# Discovered actors can use non-standard limit fields (e.g. ``resultsPerPage``);
+# registering one here lets the proposed-limit read and the ceiling clamp recognise it.
+_DYNAMIC_LIMIT_KEYS: set[str] = set()
+
+
+def register_limit_key(name: str) -> None:
+    """Register *name* as a row-count limit field for clamp/LOWER-only handling."""
+    if name and name not in _LIMIT_KEYS:
+        _DYNAMIC_LIMIT_KEYS.add(name)
+
+
+def _limit_keys() -> tuple[str, ...]:
+    """All known limit-field names: the static set plus runtime-registered ones."""
+    return _LIMIT_KEYS + tuple(_DYNAMIC_LIMIT_KEYS)
+
 
 PLANNER_SYSTEM = (
     "You are a routing planner for Pluck.ai. Given a URL and a user's "
@@ -170,7 +186,7 @@ def _proposed_limit(actor_input) -> int | None:
     """Return the item-count the model proposed, if any (for LOWER-only intent)."""
     if not isinstance(actor_input, dict):
         return None
-    for key in _LIMIT_KEYS:
+    for key in _limit_keys():
         val = actor_input.get(key)
         if isinstance(val, bool):
             continue
@@ -255,9 +271,10 @@ def _validate_plan(
 
     # Decision 2: clamp any item count above the ceiling back down.
     clamped = False
+    limit_keys = _limit_keys()
     for key, value in actor_input.items():
         if (
-            key in _LIMIT_KEYS
+            key in limit_keys
             and isinstance(value, int)
             and not isinstance(value, bool)
             and value > max_items

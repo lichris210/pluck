@@ -15,11 +15,27 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from api.routes import _planned_cache_key
 from pluck.models import FetchResult, SiteGroup, SiteProfile
 from pluck.storage.cache_store import SchemaCacheStore
 
 REGISTRY_URL = "https://www.instagram.com/nasa/"
 PLAIN_URL = "https://example.com/products"
+
+
+# ── Issue 1: results cache key folds in max_items ─────────────────────────────
+
+def test_planned_cache_key_varies_by_max_items():
+    """Same URL+prompt but different max_items must produce different cache keys,
+    so a max_items=5 result is never served to a max_items=100 request."""
+    k5 = _planned_cache_key(REGISTRY_URL, "get the posts", 5)
+    k100 = _planned_cache_key(REGISTRY_URL, "get the posts", 100)
+    assert k5 != k100
+    assert "_pluck_n=5" in k5 and "_pluck_n=100" in k100
+    # Deterministic: identical inputs -> identical key.
+    assert k5 == _planned_cache_key(REGISTRY_URL, "get the posts", 5)
+    # Prompt still participates in the key.
+    assert k5 != _planned_cache_key(REGISTRY_URL, "different prompt", 5)
 
 
 # ── shared helpers ───────────────────────────────────────────────────────────

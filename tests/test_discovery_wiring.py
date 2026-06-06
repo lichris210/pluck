@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from pluck.registry.discovery_planner import DISCOVERY_LOGIC_VERSION
 from pluck.models import FetchResult, SiteGroup, SiteProfile
 from pluck.storage.cache_store import SchemaCacheStore
 
@@ -40,11 +41,13 @@ def _discovered_entry():
         "actor_id": "climber/mp",
         "intent_description": "scrapes routes",
         "input_template": {"startUrls": [{"url": "{url}"}], "maxItems": "{max_items}"},
+        "limit_field": "maxItems",
         "default_columns": ["name"],
         "all_columns": ["name", "grade"],
         "is_default": True,
         "source": "discovered",
         "reasoning": "Best match for climbing routes.",
+        "logic_version": DISCOVERY_LOGIC_VERSION,
     }
 
 
@@ -113,7 +116,7 @@ def test_unknown_host_triggers_discovery(client, temp_store):
         patch.dict("os.environ", _ENV),
         patch("api.routes.ingest", new_callable=AsyncMock) as mock_ingest,
         patch("api.routes.search_store", new_callable=AsyncMock) as mock_search,
-        patch("api.routes.discover_actor") as mock_discover,
+        patch("api.routes.discover_actor", new_callable=AsyncMock) as mock_discover,
         patch("api.routes.capture_output_schema", new_callable=AsyncMock) as mock_capture,
         patch("api.routes.plan_extraction") as mock_plan,
         patch("pluck.fetchers.router.fetch_via_apify_plan", new_callable=AsyncMock) as mock_apify,
@@ -158,7 +161,7 @@ def test_second_request_uses_tier2_cache(client, temp_store):
         patch.dict("os.environ", _ENV),
         patch("api.routes.ingest", new_callable=AsyncMock) as mock_ingest,
         patch("api.routes.search_store", new_callable=AsyncMock) as mock_search,
-        patch("api.routes.discover_actor") as mock_discover,
+        patch("api.routes.discover_actor", new_callable=AsyncMock) as mock_discover,
         patch("api.routes.capture_output_schema", new_callable=AsyncMock) as mock_capture,
         patch("api.routes.plan_extraction") as mock_plan,
         patch("pluck.fetchers.router.fetch_via_apify_plan", new_callable=AsyncMock) as mock_apify,
@@ -191,7 +194,7 @@ def test_discovery_finds_nothing_falls_back(client):
         patch.dict("os.environ", _ENV),
         patch("api.routes.ingest", new_callable=AsyncMock) as mock_ingest,
         patch("api.routes.search_store", new_callable=AsyncMock) as mock_search,
-        patch("api.routes.discover_actor") as mock_discover,
+        patch("api.routes.discover_actor", new_callable=AsyncMock) as mock_discover,
         patch("api.routes.plan_extraction") as mock_plan,
         patch("api.routes.route_fetch", new_callable=AsyncMock) as mock_fetch,
         patch("api.routes.extract", new_callable=AsyncMock) as mock_extract,

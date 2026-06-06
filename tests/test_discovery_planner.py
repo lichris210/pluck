@@ -6,10 +6,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from pluck.registry.discovery_planner import (
+    DISCOVERY_LOGIC_VERSION,
+    _fetch_schemas_parallel,
+    _simplify_schema,
     apply_captured_schema,
     capture_output_schema,
     discover_actor,
+    fetch_actor_input_schema,
 )
+from pluck.registry.planner import _validate_plan, register_limit_key
 
 CANDIDATES = [
     {"actor_id": "apify/insta", "title": "Instagram Scraper",
@@ -24,42 +29,155 @@ def _set_response(client, payload):
     client.messages.create.return_value = client._make_response(text)
 
 
-# ── discover_actor ────────────────────────────────────────────────────────────
+# ── _simplify_schema ──────────────────────────────────────────────────────────
 
-def test_ranks_and_shapes_entry(mock_anthropic_client):
+def test_simplify_schema_keeps_core_keys_and_truncates_description():
+    schema = {
+        "required": ["startUrls"],
+        "properties": {
+            "startUrls": {
+                "type": "array", "title": "URLs", "editor": "requestListSources",
+                "description": "x" * 200, "prefill": [1, 2], "example": "noise",
+                "sectionCaption": "drop me",
+            },
+        },
+    }
+    out = _simplify_schema(schema)
+    p = out["properties"]["startUrls"]
+    assert out["required"] == ["startUrls"]
+    assert set(p) == {"type", "title", "editor", "description"}
+    assert len(p["description"]) == 120  # truncated
+    assert "prefill" not in p and "example" not in p and "sectionCaption" not in p
+
+
+def test_simplify_schema_returns_empty_on_garbage():
+    assert _simplify_schema("not a dict") == {}
+    assert _simplify_schema({"no": "properties"}) == {}
+
+
+# ── _fetch_schemas_parallel ───────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_fetch_schemas_parallel_omits_failures(caplog):
+    good = {"properties": {"maxItems": {"type": "integer"}}, "required": []}
+
+    async def fake_fetch(actor_id, token):
+        if actor_id == "b/2":
+            raise RuntimeError("boom")
+        return good
+
+    with patch(
+        "pluck.registry.discovery_planner.fetch_actor_input_schema",
+        side_effect=fake_fetch,
+    ):
+        with caplog.at_level("WARNING"):
+            out = await _fetch_schemas_parallel(["a/1", "b/2", "c/3"], "tok")
+
+    assert set(out) == {"a/1", "c/3"}  # the raiser is omitted
+    assert any("b/2" in r.message for r in caplog.records)
+
+
+# ── discover_actor (single-pass) ──────────────────────────────────────────────
+
+INSTA_SCHEMA = {
+    "required": ["directUrls"],
+    "properties": {
+        "directUrls": {"type": "array"},
+        "resultsLimit": {"type": "integer"},
+    },
+}
+
+
+def _schemas_patch(mapping):
+    return patch(
+        "pluck.registry.discovery_planner._fetch_schemas_parallel",
+        new=AsyncMock(return_value=mapping),
+    )
+
+
+@pytest.mark.asyncio
+async def test_discover_actor_single_pass_returns_entry(mock_anthropic_client):
     _set_response(mock_anthropic_client, {
         "actor_id": "apify/insta",
-        "intent_description": "Scrapes posts.",
+        "rationale": "Best fit for posts.",
         "input_template": {"directUrls": ["{url}"], "resultsLimit": "{max_items}"},
-        "input_notes": "directUrls is an array.",
-        "row_unit": "post",
-        "default_columns": ["caption"],
-        "all_columns": ["caption", "likesCount"],
-        "reasoning": "Best match for posts.",
+        "limit_field": "resultsLimit",
     })
-
-    entry = discover_actor(URL, "get posts", CANDIDATES, mock_anthropic_client)
+    with _schemas_patch({"apify/insta": INSTA_SCHEMA}):
+        entry = await discover_actor(URL, "get posts", CANDIDATES, mock_anthropic_client, apify_token="t")
 
     assert entry["actor_id"] == "apify/insta"
     assert entry["source"] == "discovered"
     assert entry["domain_patterns"] == ["mountainproject.com"]
-    assert entry["is_default"] is True
-    assert entry["input_template"]["directUrls"] == ["{url}"]
+    assert entry["limit_field"] == "resultsLimit"
+    assert entry["logic_version"] == DISCOVERY_LOGIC_VERSION
+    assert entry["input_template"]["resultsLimit"] == "{max_items}"
     mock_anthropic_client.messages.create.assert_called_once()
 
 
-def test_unparseable_retries_then_none(mock_anthropic_client):
-    bad = mock_anthropic_client._make_response("not json {{{")
-    mock_anthropic_client.messages.create.side_effect = [bad, bad]
+@pytest.mark.asyncio
+async def test_discover_actor_drops_keys_absent_from_schema(mock_anthropic_client):
+    _set_response(mock_anthropic_client, {
+        "actor_id": "apify/insta",
+        "rationale": "x",
+        "input_template": {"directUrls": ["{url}"], "bogusField": "nope"},
+        "limit_field": None,
+    })
+    with _schemas_patch({"apify/insta": INSTA_SCHEMA}):
+        entry = await discover_actor(URL, "p", CANDIDATES, mock_anthropic_client, apify_token="t")
 
-    entry = discover_actor(URL, "get posts", CANDIDATES, mock_anthropic_client)
+    assert "bogusField" not in entry["input_template"]
+    assert "directUrls" in entry["input_template"]
+
+
+@pytest.mark.asyncio
+async def test_discover_actor_missing_required_nonproxy_returns_none(mock_anthropic_client):
+    _set_response(mock_anthropic_client, {
+        "actor_id": "apify/insta",
+        "rationale": "x",
+        "input_template": {"resultsLimit": "{max_items}"},  # missing required directUrls
+        "limit_field": "resultsLimit",
+    })
+    with _schemas_patch({"apify/insta": INSTA_SCHEMA}):
+        entry = await discover_actor(URL, "p", CANDIDATES, mock_anthropic_client, apify_token="t")
 
     assert entry is None
-    assert mock_anthropic_client.messages.create.call_count == 2
 
 
-def test_empty_candidates_returns_none(mock_anthropic_client):
-    entry = discover_actor(URL, "get posts", [], mock_anthropic_client)
+@pytest.mark.asyncio
+async def test_discover_actor_autofills_required_proxy(mock_anthropic_client):
+    schema = {
+        "required": ["startUrls", "proxyConfiguration"],
+        "properties": {
+            "startUrls": {"type": "array"},
+            "proxyConfiguration": {"type": "object", "editor": "proxy"},
+        },
+    }
+    _set_response(mock_anthropic_client, {
+        "actor_id": "reddit/scraper",
+        "rationale": "x",
+        "input_template": {"startUrls": [{"url": "{url}"}]},  # omits required proxy
+        "limit_field": None,
+    })
+    cands = [{"actor_id": "reddit/scraper", "title": "Reddit", "readmeSummary": "posts"}]
+    with _schemas_patch({"reddit/scraper": schema}):
+        entry = await discover_actor(URL, "p", cands, mock_anthropic_client, apify_token="t")
+
+    assert entry is not None
+    assert entry["input_template"]["proxyConfiguration"] == {"useApifyProxy": True}
+
+
+@pytest.mark.asyncio
+async def test_discover_actor_empty_candidates_returns_none(mock_anthropic_client):
+    entry = await discover_actor(URL, "p", [], mock_anthropic_client, apify_token="t")
+    assert entry is None
+    mock_anthropic_client.messages.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_discover_actor_all_schemas_fail_returns_none(mock_anthropic_client):
+    with _schemas_patch({}):  # no schemas fetched
+        entry = await discover_actor(URL, "p", CANDIDATES, mock_anthropic_client, apify_token="t")
     assert entry is None
     mock_anthropic_client.messages.create.assert_not_called()
 
@@ -140,3 +258,45 @@ async def test_capture_output_schema_failure_returns_empty():
     # apply leaves the readme-guessed columns intact
     applied = apply_captured_schema(entry, cols)
     assert applied["default_columns"] == ["guess"]
+
+
+# ── fetch_actor_input_schema ──────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_fetch_actor_input_schema_follows_build():
+    """Actor object has no inline schema → follow taggedBuilds.latest to the build."""
+    inner = json.dumps({"properties": {"maxItems": {"type": "integer"}}, "required": []})
+
+    async def fake_get(url, params=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "/builds/" in url:
+            resp.json.return_value = {"data": {"inputSchema": inner}}
+        else:
+            resp.json.return_value = {"data": {"taggedBuilds": {"latest": {"buildId": "B1"}}}}
+        return resp
+
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=fake_get)
+
+    schema = await fetch_actor_input_schema("apify/tiktok-scraper", "tok", client=client)
+
+    assert "maxItems" in schema["properties"]
+
+
+def test_register_limit_key_enables_clamp():
+    """A runtime-registered limit field is clamped to the ceiling like a static one."""
+    register_limit_key("resultsPerPage")
+    candidate = {
+        "actor_id": "x/y",
+        "input_template": {"resultsPerPage": "{max_items}"},
+        "all_columns": ["a"],
+        "default_columns": ["a"],
+    }
+    plan = {
+        "actor_id": "x/y",
+        "actor_input": {"resultsPerPage": 10000},
+        "output_shape": {"columns": ["a"]},
+    }
+    validated = _validate_plan(plan, [candidate], 50)
+    assert validated["actor_input"]["resultsPerPage"] == 50

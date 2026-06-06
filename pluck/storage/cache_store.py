@@ -116,6 +116,15 @@ class SchemaCacheStore:
         self._conn.execute(_CREATE_DOMAIN_TTL)
         self._conn.execute(_CREATE_PLAN_CACHE)
         self._conn.execute(_CREATE_DISCOVERED_ACTORS)
+        # Migration: add logic_version so entries written by an older discovery flow
+        # (default 0) are invisible to the v2 loader without manual DB cleanup.
+        cur = self._conn.execute("PRAGMA table_info(discovered_actors)")
+        _cols = {row[1] for row in cur.fetchall()}
+        if "logic_version" not in _cols:
+            self._conn.execute(
+                "ALTER TABLE discovered_actors "
+                "ADD COLUMN logic_version INTEGER NOT NULL DEFAULT 0"
+            )
         for _domain, _ttl in _DEFAULT_DOMAIN_TTLS.items():
             self._conn.execute(
                 "INSERT INTO domain_ttl (domain, ttl_seconds)"
@@ -308,19 +317,22 @@ class SchemaCacheStore:
 
     # ── discovered_actors (tier 2) ────────────────────────────────────────────
 
-    def get_discovered(self, domain_pattern: str) -> list[dict]:
+    def get_discovered(self, domain_pattern: str, min_logic_version: int = 0) -> list[dict]:
         """Return non-expired discovered entries for *domain_pattern* as dicts.
 
-        Bumps last_used_at/use_count on each returned row. Each dict is the stored
-        registry entry with ``successful_runs`` folded in (for confidence scoring).
+        Only rows with ``logic_version >= min_logic_version`` are returned (default 0
+        keeps existing callers untouched; the loader passes DISCOVERY_LOGIC_VERSION so
+        entries from an older discovery flow are ignored). Bumps last_used_at/use_count
+        on each returned row. Each dict is the stored registry entry with
+        ``successful_runs`` folded in.
         """
         rows = self._conn.execute(
             """
             SELECT actor_id, entry_json, successful_runs, created_at
               FROM discovered_actors
-             WHERE domain_pattern = ?
+             WHERE domain_pattern = ? AND logic_version >= ?
             """,
-            (domain_pattern,),
+            (domain_pattern, min_logic_version),
         ).fetchall()
 
         now = self._clock()
@@ -368,18 +380,20 @@ class SchemaCacheStore:
         logger.debug(
             "put_discovered WRITE: domain_pattern=%s actor_id=%s", domain_pattern, actor_id
         )
+        logic_version = int(entry.get("logic_version", 0) or 0)
         self._conn.execute(
             """
             INSERT INTO discovered_actors
                 (domain_pattern, actor_id, entry_json, source,
-                 successful_runs, created_at, last_used_at, use_count)
-            VALUES (?, ?, ?, 'discovered', 0, ?, ?, 0)
+                 successful_runs, created_at, last_used_at, use_count, logic_version)
+            VALUES (?, ?, ?, 'discovered', 0, ?, ?, 0, ?)
             ON CONFLICT(domain_pattern, actor_id) DO UPDATE SET
                 entry_json = excluded.entry_json,
                 created_at = excluded.created_at,
-                last_used_at = excluded.last_used_at
+                last_used_at = excluded.last_used_at,
+                logic_version = excluded.logic_version
             """,
-            (domain_pattern, actor_id, json.dumps(entry), now, now),
+            (domain_pattern, actor_id, json.dumps(entry), now, now, logic_version),
         )
         self._conn.commit()
 

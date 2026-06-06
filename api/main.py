@@ -32,6 +32,11 @@ def configure_logging() -> None:
     handler._pluck = True  # marker so we replace (not stack) on re-import
     root.addHandler(handler)
 
+    # Silence the per-request HTTP client logs — they add no operational value.
+    # Apify and Pluck app logs stay at the root level (INFO by default).
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 
 configure_logging()
 

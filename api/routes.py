@@ -88,17 +88,18 @@ def _planner_enabled() -> bool:
     return (os.environ.get("USE_PLANNER") or "").strip().lower() in _PLANNER_TRUTHY
 
 
-def _planned_cache_key(url: str, prompt: str | None) -> str:
-    """Results-cache key for the planned path: URL plus a prompt hash.
+def _planned_cache_key(url: str, prompt: str | None, max_items: int) -> str:
+    """Results-cache key for the planned path: URL + prompt hash + max_items.
 
     The planner shapes output from the prompt, so the same URL with a different
-    prompt must not serve a stale shaped result (plan gotcha 3). Appended as a
-    query param because ``results_key`` keeps (and sorts) the query but drops the
-    fragment.
+    prompt must not serve a stale shaped result (plan gotcha 3). ``max_items`` is
+    folded in too (Issue 1): a max_items=5 result must not be served to a later
+    max_items=100 request. Appended as query params because ``results_key`` keeps
+    (and sorts) the query but drops the fragment.
     """
     digest = hashlib.sha256((prompt or "").encode("utf-8")).hexdigest()[:16]
     sep = "&" if urlparse(url).query else "?"
-    return f"{url}{sep}_pluck_phash={digest}"
+    return f"{url}{sep}_pluck_phash={digest}&_pluck_n={max_items}"
 
 
 def _plan_cache_key(url: str, prompt: str | None) -> str:
@@ -202,7 +203,7 @@ async def extract_endpoint(
 
         # The planned path shapes output from the prompt, so its results cache
         # key folds in a prompt hash (plan gotcha 3); the legacy path is unchanged.
-        cache_key = _planned_cache_key(url, prompt) if planned_path else url
+        cache_key = _planned_cache_key(url, prompt, max_items) if planned_path else url
 
         # ── results cache check (skipped when refresh=true) ──────────────
         _cached = None if refresh else _schema_cache.get_cached_result(cache_key)
@@ -245,6 +246,7 @@ async def extract_endpoint(
             disc_client = _UsageTrackingClient(
                 anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
             )
+            apify_token = os.environ.get("APIFY_TOKEN")
             entry = None
             try:
                 query = build_search_query(url)
@@ -254,7 +256,11 @@ async def extract_endpoint(
                     "Discovery triggered: query=%r candidates_after_filter=%d names=%s",
                     query, len(cands), [c.get("actor_id") for c in cands],
                 )
-                entry = discover_actor(url, prompt or "", cands, disc_client)
+                # Single-pass: discover_actor fetches the top candidates' live input
+                # schemas and returns a schema-validated entry in one Haiku call.
+                entry = await discover_actor(
+                    url, prompt or "", cands, disc_client, apify_token=apify_token
+                )
             except Exception as exc:
                 logger.warning(
                     "Discovery failed for %s: %s — falling back to legacy path", url, exc
@@ -265,17 +271,16 @@ async def extract_endpoint(
             )
 
             # A discovered actor is only trustworthy once its maxItems=1 probe
-            # returns real content. An empty capture (no row / thin row / bad input
-            # guess) means we do NOT cache it — fall through to the legacy path
-            # (Issue 1). With no APIFY_TOKEN there is nothing to probe and the apify
-            # fetch would fail anyway, so we skip caching in that case too.
+            # returns real content. An empty capture (no row / thin row / bad input)
+            # means we do NOT cache it — fall through to the legacy path. With no
+            # APIFY_TOKEN there is nothing to probe and the apify fetch would fail
+            # anyway, so we skip caching in that case too.
             if entry is not None:
                 logger.info(
                     "Discovery actor chosen: actor_id=%s reasoning=%r source=discovered",
                     entry.get("actor_id"), (entry.get("reasoning") or "")[:100],
                 )
 
-            apify_token = os.environ.get("APIFY_TOKEN")
             captured: list[str] = []
             if entry is not None and apify_token:
                 captured = await capture_output_schema(entry, apify_token, url)
@@ -294,7 +299,7 @@ async def extract_endpoint(
                 )
                 candidates = [entry]
                 planned_path = True
-                cache_key = _planned_cache_key(url, prompt)
+                cache_key = _planned_cache_key(url, prompt, max_items)
                 cache_events.append("discovery")
                 runs = entry.get("successful_runs", 0)
                 logger.info(
@@ -313,6 +318,10 @@ async def extract_endpoint(
                     "Discovery schema capture failed for %s; falling back to legacy path",
                     url,
                 )
+            # KNOWN LIMITATION (Issue 3): when discovery yields nothing and the site is
+            # JavaScript-heavy, the legacy fallback uses the Group-1 static fetcher, which
+            # can't render JS — so the user may get thin/empty results (e.g. Reddit). A
+            # real fix (route JS sites to a dynamic fetcher) is a future task.
 
         # ── intent-aware planner (registry hosts only, behind USE_PLANNER) ──
         if planned_path:
