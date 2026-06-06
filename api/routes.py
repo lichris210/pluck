@@ -245,11 +245,18 @@ async def extract_endpoint(
                 disc_client.input_tokens, disc_client.output_tokens
             )
 
-            if entry is not None:
-                apify_token = os.environ.get("APIFY_TOKEN")
-                if apify_token:
-                    columns = await capture_output_schema(entry, apify_token, url)
-                    entry = apply_captured_schema(entry, columns)
+            # A discovered actor is only trustworthy once its maxItems=1 probe
+            # returns real content. An empty capture (no row / thin row / bad input
+            # guess) means we do NOT cache it — fall through to the legacy path
+            # (Issue 1). With no APIFY_TOKEN there is nothing to probe and the apify
+            # fetch would fail anyway, so we skip caching in that case too.
+            apify_token = os.environ.get("APIFY_TOKEN")
+            captured: list[str] = []
+            if entry is not None and apify_token:
+                captured = await capture_output_schema(entry, apify_token, url)
+                entry = apply_captured_schema(entry, captured)
+
+            if entry is not None and captured:
                 host = _discovery_host(url)
                 _schema_cache.put_discovered(host, entry)
                 candidates = [entry]
@@ -263,6 +270,11 @@ async def extract_endpoint(
                     "source": "discovered",
                     "confidence": _discovery_confidence(runs),
                 })
+            elif entry is not None:
+                logger.warning(
+                    "Discovery schema capture failed for %s; falling back to legacy path",
+                    url,
+                )
 
         # ── intent-aware planner (registry hosts only, behind USE_PLANNER) ──
         if planned_path:

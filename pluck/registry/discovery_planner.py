@@ -174,12 +174,28 @@ async def capture_output_schema(
             return []
         page = await client.dataset(run["defaultDatasetId"]).list_items(limit=1)
         items = page.items
-        if items and isinstance(items[0], dict):
+        # The probe must return a row that looks like real content — a thin row
+        # (e.g. an error stub or a near-empty object) means the actor/input guess
+        # was wrong, so treat it as a failed capture (Issue 1).
+        if items and isinstance(items[0], dict) and _looks_like_content(items[0]):
             return list(items[0].keys())
         return []
     except Exception as exc:
         logger.warning("Schema capture failed for %s: %s", actor_id, exc)
         return []
+
+
+def _looks_like_content(row: dict) -> bool:
+    """True when *row* has at least 3 keys with non-empty values.
+
+    Guards against a successful-but-useless probe: an error stub or near-empty
+    object should not be trusted as a captured schema.
+    """
+    non_empty = [
+        k for k, v in row.items()
+        if v is not None and v != "" and v != [] and v != {}
+    ]
+    return len(non_empty) >= 3
 
 
 def apply_captured_schema(entry: dict, columns: list[str]) -> dict:

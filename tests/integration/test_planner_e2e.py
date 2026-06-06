@@ -124,11 +124,20 @@ def test_natgeo_profile_intent(client, planner_on):
     assert done["total_rows"] == 1, f"expected exactly 1 profile, got {done['total_rows']}"
 
 
-# ── case 3: out-of-registry URL → no planner, falls through to groups 1-6 ──────
+# ── case 3: out-of-registry URL → discovery engages OR graceful fallback ──────
 
 @pytest.mark.integration
 @requires_anthropic
 def test_out_of_registry_fallthrough(client, planner_on):
+    # Phase 3 changed this case: an out-of-registry host no longer "never plans".
+    # With USE_PLANNER on the handler now attempts Store discovery. Option (b) from
+    # the Phase 3 follow-ups: we accept either outcome and assert the request stays
+    # healthy. Two valid endings:
+    #   1. Discovery found a usable actor (a "discovery"/source=discovered event,
+    #      then a planned scrape) — requires APIFY_TOKEN for the schema-capture probe.
+    #   2. Discovery found nothing usable (no Store hit, or the capture probe failed),
+    #      so it falls back to the legacy classify → fetch → extract path.
+    # Either way the stream must end in a successful done event with items.
     tok = _token(client)
     resp = client.get("/api/extract", params={
         "url": OUT_OF_REGISTRY_URL,
@@ -138,10 +147,14 @@ def test_out_of_registry_fallthrough(client, planner_on):
     assert resp.status_code == 200, resp.text
     events = _parse_sse(resp.text)
 
-    # Flag is on, but the host is not in the registry: the planner never runs.
-    assert not any(e["step"] == "planning" for e in events)
+    discovered = any(e.get("source") == "discovered" for e in events)
+    planned = any(e.get("step") == "planning" for e in events)
+    # Planning only happens off the back of a successful discovery here.
+    assert planned == discovered, (
+        "planning should occur iff discovery surfaced an actor"
+    )
 
-    # The legacy path still classifies, fetches, extracts and emits a done event.
+    # Regardless of path, the request classifies and produces a done event.
     assert any(e["step"] == "classifying" and e["status"] == "done" for e in events)
     done = next(e for e in events if e["step"] == "done")
     assert done["status"] == "done"

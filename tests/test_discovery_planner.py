@@ -88,15 +88,39 @@ async def test_capture_output_schema_returns_row_keys():
         "default_columns": ["guess"],
         "all_columns": ["guess"],
     }
-    client = _apify_client([{"caption": "hi", "likesCount": 5}])
+    client = _apify_client([{"caption": "hi", "likesCount": 5, "timestamp": "2026"}])
 
     with patch("pluck.registry.discovery_planner.ApifyClientAsync", return_value=client):
         cols = await capture_output_schema(entry, "tok", URL)
 
-    assert cols == ["caption", "likesCount"]
+    assert cols == ["caption", "likesCount", "timestamp"]
     applied = apply_captured_schema(entry, cols)
-    assert applied["all_columns"] == ["caption", "likesCount"]
-    assert applied["default_columns"] == ["caption", "likesCount"]
+    assert applied["all_columns"] == ["caption", "likesCount", "timestamp"]
+    assert applied["default_columns"] == ["caption", "likesCount", "timestamp"]
+
+
+@pytest.mark.asyncio
+async def test_capture_returns_empty_on_thin_row():
+    # A row with only one key is not real content → treat as failed capture.
+    entry = {"actor_id": "apify/insta", "input_template": {"url": "{url}"}}
+    client = _apify_client([{"error": "blocked"}])
+
+    with patch("pluck.registry.discovery_planner.ApifyClientAsync", return_value=client):
+        cols = await capture_output_schema(entry, "tok", URL)
+
+    assert cols == []
+
+
+@pytest.mark.asyncio
+async def test_capture_returns_columns_on_real_row():
+    entry = {"actor_id": "apify/insta", "input_template": {"url": "{url}"}}
+    row = {"id": 1, "text": "hi", "likes": 5, "url": "u", "author": "a"}
+    client = _apify_client([row])
+
+    with patch("pluck.registry.discovery_planner.ApifyClientAsync", return_value=client):
+        cols = await capture_output_schema(entry, "tok", URL)
+
+    assert cols == ["id", "text", "likes", "url", "author"]
 
 
 @pytest.mark.asyncio

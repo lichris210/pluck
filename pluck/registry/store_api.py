@@ -35,10 +35,12 @@ def _normalize_item(item: dict) -> dict:
     stats = item.get("stats") if isinstance(item.get("stats"), dict) else {}
     username = item.get("username")
     name = item.get("name")
-    # actor_id is conventionally "username/name"
-    actor_id = item.get("id")
-    if not actor_id and username and name:
+    # Prefer the human-readable "username/name" form (e.g. apify/tiktok-video-scraper)
+    # over the opaque Store id; both are accepted by ApifyClientAsync.actor() (Issue 3).
+    if username and name:
         actor_id = f"{username}/{name}"
+    else:
+        actor_id = item.get("id")
     return {
         "actor_id": actor_id,
         "name": name,
