@@ -1,13 +1,16 @@
 """Tests for discovery ranking + schema capture (Phase 3, Prompt 3)."""
 
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from pluck.registry.discovery_planner import (
     DISCOVERY_LOGIC_VERSION,
+    DISCOVERY_SYSTEM,
     _fetch_schemas_parallel,
+    _normalize_input_template,
     _simplify_schema,
     apply_captured_schema,
     capture_output_schema,
@@ -300,3 +303,62 @@ def test_register_limit_key_enables_clamp():
     }
     validated = _validate_plan(plan, [candidate], 50)
     assert validated["actor_input"]["resultsPerPage"] == 50
+
+
+# ── Issue 1: input-template normalization against the real schema ─────────────
+
+def test_normalize_string_array_to_object_array():
+    # requestListSources field: Haiku gave a string array; schema wants object array.
+    schema = {"properties": {"startUrls": {"type": "array", "editor": "requestListSources"}}}
+    out = _normalize_input_template({"startUrls": ["https://x.com/y"]}, schema)
+    assert out["startUrls"] == [{"url": "https://x.com/y"}]
+
+
+def test_normalize_uses_schema_item_key():
+    # items.properties names the key ("link", not "url") → use it.
+    schema = {"properties": {"sources": {
+        "type": "array", "items": {"type": "object", "properties": {"link": {"type": "string"}}}}}}
+    out = _normalize_input_template({"sources": ["u1", "u2"]}, schema)
+    assert out["sources"] == [{"link": "u1"}, {"link": "u2"}]
+
+
+def test_normalize_already_correct_shape():
+    schema = {"properties": {"startUrls": {"type": "array", "editor": "requestListSources"}}}
+    template = {"startUrls": [{"url": "https://x.com/y"}]}
+    out = _normalize_input_template(template, schema)
+    assert out == template
+
+
+def test_normalize_object_to_array_of_objects():
+    # schema expects a proxy object; Haiku gave a string → wrap to the proxy object.
+    schema = {"properties": {"proxyConfiguration": {"type": "object", "editor": "proxy"}}}
+    out = _normalize_input_template({"proxyConfiguration": "RESIDENTIAL"}, schema)
+    assert out["proxyConfiguration"] == {"useApifyProxy": True}
+
+
+def test_normalize_logs_transformations(caplog):
+    schema = {"properties": {"startUrls": {"type": "array", "editor": "requestListSources"}}}
+    with caplog.at_level(logging.INFO, logger="pluck.registry.discovery_planner"):
+        _normalize_input_template({"startUrls": ["x"]}, schema)
+    assert any("Normalized input field startUrls" in r.message for r in caplog.records)
+
+
+# ── Issue 2: ranking guidance in the discovery system prompt ──────────────────
+# Behavioural verification (a video scraper is chosen for "get videos") is a live
+# concern of a real model, exercised by the tiktok smoke test; here we assert the
+# steering rules are present in the prompt.
+
+def test_ranking_prompt_prefers_per_item_for_list_intents():
+    sys = DISCOVERY_SYSTEM.lower()
+    assert "one row per item" in sys
+    assert "video scraper" in sys
+    assert "profile scraper" in sys
+
+
+def test_ranking_prompt_keeps_profile_for_aggregate_intents():
+    sys = DISCOVERY_SYSTEM.lower()
+    assert "get bio" in sys or "follower count" in sys
+
+
+def test_prompt_includes_object_array_example():
+    assert '[{"url": "{url}"}]' in DISCOVERY_SYSTEM

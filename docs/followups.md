@@ -37,3 +37,15 @@ actors also require account permission approval.
 Fix idea: track per-actor empty-result counts and blacklist (or down-rank) a discovered
 actor after N consecutive empty/thin outputs, so discovery stops re-selecting an actor
 that reliably fails for a given host.
+
+## 4. Actor minimum-cost floors vs small max_items
+
+Some actors (e.g. the hardcoded `trudax/reddit-scraper-lite`) enforce a minimum cost
+per run: a request with `max_items` below ~15 fails with "Maximum cost per run is lower
+than actor start cost" (observed at `max_items=10`). The Apify `.call(max_items=N)` cost
+cap is what trips it. The registry entry's `input_notes` documents this, but nothing
+enforces a per-entry floor at request time.
+
+Fix idea: add an optional `min_items` field to registry/discovered entries and clamp
+`max_items` up to it (or surface a clearer error) so these actors don't hard-fail on
+small requests.

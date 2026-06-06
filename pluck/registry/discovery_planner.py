@@ -30,7 +30,7 @@ DEFAULT_MODEL = "claude-haiku-4-5"
 _MAX_TOKENS = 1024
 
 # Bump when discover_actor's logic changes in a way that invalidates cached entries.
-DISCOVERY_LOGIC_VERSION = 2
+DISCOVERY_LOGIC_VERSION = 3
 
 DISCOVERY_SYSTEM = (
     "You are an actor-discovery planner for Pluck.ai. You are given a URL, the "
@@ -48,9 +48,24 @@ DISCOVERY_SYSTEM = (
     '  "limit_field": "<the schema property that caps the number of returned rows, '
     'or null>"\n'
     "}\n\n"
+    "Ranking (which actor to pick):\n"
+    "- When the user's prompt implies a LIST of items (verbs like 'list', 'get all', "
+    "'scrape'; plurals like 'posts', 'videos', 'reviews', 'jobs'), prefer actors whose "
+    "output is ONE ROW PER ITEM over profile-level or aggregate scrapers. Inspect the "
+    "actor title/README: phrases like 'per profile', 'profile metadata', 'channel "
+    "info' suggest a profile scraper (one aggregate row); phrases like 'each video', "
+    "'individual posts', 'list of items' suggest a per-item scraper. For 'get videos' "
+    "pick a video scraper, not a profile scraper.\n"
+    "- When the prompt asks for profile/account/aggregate info (e.g. 'get bio', "
+    "'follower count', 'channel info'), prefer the profile scraper instead.\n\n"
     "Rules:\n"
     "- Use ONLY property names that appear in the chosen candidate's "
     "schema.properties. Do not invent fields.\n"
+    "- Match each field's value to its schema shape. For an array field whose items "
+    "are objects (schema items.type == 'object', or editor 'requestListSources'), "
+    'return [{KEY: "{url}"}], NOT ["{url}"]. Read the field\'s items.properties to find '
+    'KEY (usually "url"). Example: a startUrls field with editor "requestListSources" '
+    'takes {"startUrls": [{"url": "{url}"}]}, never {"startUrls": ["{url}"]}.\n'
     "- Include EVERY field listed in the chosen schema's 'required' array.\n"
     "- Placeholders are substituted later by code: {url} = the full URL, {username} = "
     "the handle / first path segment, {max_items} = the row cap. Each placeholder MUST "
@@ -153,6 +168,20 @@ def _simplify_schema(schema: dict) -> dict:
             kept["description"] = desc[:120]
         if spec.get("editor"):
             kept["editor"] = spec["editor"]
+        # Keep a minimal items shape for array fields so both the prompt and the
+        # input normalizer know whether items are objects (and the object key).
+        if spec.get("type") == "array" and isinstance(spec.get("items"), dict):
+            items = spec["items"]
+            kept_items: dict = {}
+            if items.get("type"):
+                kept_items["type"] = items["type"]
+            iprops = items.get("properties")
+            if isinstance(iprops, dict) and iprops:
+                kept_items["properties"] = {
+                    k: {"type": (v or {}).get("type")} for k, v in iprops.items()
+                }
+            if kept_items:
+                kept["items"] = kept_items
         simple_props[name] = kept
 
     required = schema.get("required")
@@ -238,6 +267,89 @@ def _request_single(client, model, url, prompt, payload):
     return parsed[0] if parsed else None
 
 
+# ── input-template normalization against the real schema (Issue 1) ────────────
+
+def _expects_object_array(schema_entry: dict) -> bool:
+    if schema_entry.get("type") != "array":
+        return False
+    if schema_entry.get("editor") == "requestListSources":
+        return True
+    items = schema_entry.get("items") or {}
+    return isinstance(items, dict) and items.get("type") == "object"
+
+
+def _expects_string_array(schema_entry: dict) -> bool:
+    if schema_entry.get("type") != "array":
+        return False
+    items = schema_entry.get("items") or {}
+    return isinstance(items, dict) and items.get("type") == "string"
+
+
+def _expects_object(schema_entry: dict) -> bool:
+    return schema_entry.get("type") == "object" or schema_entry.get("editor") == "proxy"
+
+
+def _array_item_key(schema_entry: dict) -> str:
+    """The object key for an array-of-objects field; 'url' unless the schema says otherwise."""
+    items = schema_entry.get("items") or {}
+    props = items.get("properties") if isinstance(items, dict) else None
+    if isinstance(props, dict) and props:
+        return "url" if "url" in props else next(iter(props))
+    return "url"
+
+
+def _is_proxy_field(name: str, schema_entry: dict) -> bool:
+    return "proxy" in (name or "").lower() or schema_entry.get("editor") == "proxy"
+
+
+def _coerce_field(name: str, value, schema_entry: dict):
+    """Reshape *value* to match *schema_entry*. Returns (value, change_desc_or_None)."""
+    se = schema_entry or {}
+
+    if _expects_object_array(se):
+        if isinstance(value, list) and value and all(isinstance(v, str) for v in value):
+            key = _array_item_key(se)
+            return [{key: v} for v in value], "string array -> object array"
+        return value, None
+
+    if _expects_string_array(se):
+        if isinstance(value, list) and value and all(isinstance(v, dict) for v in value):
+            out = []
+            for v in value:
+                s = v.get("url") if "url" in v else next(
+                    (x for x in v.values() if isinstance(x, str)), None
+                )
+                if s is not None:
+                    out.append(s)
+            if out:
+                return out, "object array -> string array"
+        return value, None
+
+    if _expects_object(se):
+        if isinstance(value, str) and _is_proxy_field(name, se):
+            return {"useApifyProxy": True}, "string -> proxy object"
+        return value, None
+
+    return value, None
+
+
+def _normalize_input_template(template: dict, schema: dict) -> dict:
+    """Reshape each input_template field to its real schema shape (Issue 1).
+
+    Fixes the common Haiku mismatch of building ``["{url}"]`` for an object-array
+    field (``[{"url": "{url}"}]``), and similar. Additive: fields already in the
+    right shape, or with no schema entry, pass through unchanged.
+    """
+    properties = (schema or {}).get("properties", {}) or {}
+    out: dict = {}
+    for name, value in template.items():
+        coerced, change = _coerce_field(name, value, properties.get(name, {}))
+        if change:
+            logger.info("Normalized input field %s: %s", name, change)
+        out[name] = coerced
+    return out
+
+
 async def discover_actor(
     url: str,
     prompt: str,
@@ -307,6 +419,10 @@ async def discover_actor(
             template[limit_field] = "{max_items}"
     else:
         limit_field = None
+
+    # Issue 1: reshape fields to match the real schema (e.g. ["{url}"] ->
+    # [{"url": "{url}"}]) before the capture probe runs.
+    template = _normalize_input_template(template, chosen)
 
     logger.info(
         "Discovery single-pass: actor_id=%s limit_field=%s template_keys=%s",
