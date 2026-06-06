@@ -1,13 +1,42 @@
+import logging
 import os
+import sys
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from api import routes
-
 load_dotenv()
+
+# Operator-facing log format: WHERE (name:funcName:lineno) + WHAT (the message).
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s:%(funcName)s:%(lineno)d - %(message)s"
+
+
+def configure_logging() -> None:
+    """Attach a stdout handler with LOG_FORMAT to the root logger.
+
+    Level comes from LOG_LEVEL (default INFO). Logs go to stdout so Railway
+    captures them. The handler is tagged so a re-import never stacks duplicates,
+    and propagation is left intact so pytest's caplog still captures cleanly.
+    """
+    level_name = (os.environ.get("LOG_LEVEL") or "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    root.handlers = [h for h in root.handlers if not getattr(h, "_pluck", False)]
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    handler._pluck = True  # marker so we replace (not stack) on re-import
+    root.addHandler(handler)
+
+
+configure_logging()
+
+# Imported after logging is configured so module-level loggers inherit the root config.
+from api import routes  # noqa: E402
 
 app = FastAPI(title="Pluck.ai API")
 

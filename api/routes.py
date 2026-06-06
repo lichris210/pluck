@@ -187,10 +187,18 @@ async def extract_endpoint(
     async def stream():
         t0 = time.perf_counter()
 
+        # Accumulates which cache/discovery events fired, for the final done log.
+        cache_events: list[str] = []
+
         # ── planner gate: registry host + USE_PLANNER forces the Apify branch
         # (plan gotcha 2) regardless of how the host would otherwise classify.
         candidates = candidates_for_url(url) if _planner_enabled() else []
         planned_path = bool(candidates)
+
+        logger.info(
+            "Request received: url=%s prompt=%r max_items=%d refresh=%s planned_path=%s",
+            url, (prompt or "")[:100], max_items, refresh, planned_path,
+        )
 
         # The planned path shapes output from the prompt, so its results cache
         # key folds in a prompt hash (plan gotcha 3); the legacy path is unchanged.
@@ -199,6 +207,7 @@ async def extract_endpoint(
         # ── results cache check (skipped when refresh=true) ──────────────
         _cached = None if refresh else _schema_cache.get_cached_result(cache_key)
         if _cached is not None:
+            logger.info("Results cache hit: key=%s — serving cached response", cache_key)
             payload = json.loads(_cached)
             payload["total_time_ms"] = round((time.perf_counter() - t0) * 1000, 1)
             payload["from_cache"] = True
@@ -213,6 +222,10 @@ async def extract_endpoint(
             yield _sse({"step": "classifying", "status": "error", "error": profile.error})
             return
 
+        logger.info(
+            "Classifier done: url=%s site_group=%d (%s)",
+            url, profile.site_group.value, profile.site_group.name,
+        )
         yield _sse({
             "step": "classifying",
             "status": "done",
@@ -237,9 +250,15 @@ async def extract_endpoint(
                 query = build_search_query(url)
                 store_items = await search_store(query)
                 cands = filter_candidates(store_items)
+                logger.info(
+                    "Discovery triggered: query=%r candidates_after_filter=%d names=%s",
+                    query, len(cands), [c.get("actor_id") for c in cands],
+                )
                 entry = discover_actor(url, prompt or "", cands, disc_client)
             except Exception as exc:
-                logger.warning("Discovery failed for %s: %s", url, exc)
+                logger.warning(
+                    "Discovery failed for %s: %s — falling back to legacy path", url, exc
+                )
                 entry = None
             planner_cost += _token_cost(
                 disc_client.input_tokens, disc_client.output_tokens
@@ -250,19 +269,38 @@ async def extract_endpoint(
             # guess) means we do NOT cache it — fall through to the legacy path
             # (Issue 1). With no APIFY_TOKEN there is nothing to probe and the apify
             # fetch would fail anyway, so we skip caching in that case too.
+            if entry is not None:
+                logger.info(
+                    "Discovery actor chosen: actor_id=%s reasoning=%r source=discovered",
+                    entry.get("actor_id"), (entry.get("reasoning") or "")[:100],
+                )
+
             apify_token = os.environ.get("APIFY_TOKEN")
             captured: list[str] = []
             if entry is not None and apify_token:
                 captured = await capture_output_schema(entry, apify_token, url)
+                logger.info(
+                    "Schema capture: actor_id=%s keys=%d sample=%s accepted=%s",
+                    entry.get("actor_id"), len(captured), captured[:5], bool(captured),
+                )
                 entry = apply_captured_schema(entry, captured)
 
             if entry is not None and captured:
                 host = _discovery_host(url)
                 _schema_cache.put_discovered(host, entry)
+                logger.info(
+                    "Tier 2 cache write: domain_pattern=%s actor_id=%s columns=%d",
+                    host, entry["actor_id"], len(captured),
+                )
                 candidates = [entry]
                 planned_path = True
                 cache_key = _planned_cache_key(url, prompt)
+                cache_events.append("discovery")
                 runs = entry.get("successful_runs", 0)
+                logger.info(
+                    "Discovery complete: actor_id=%s source=discovered confidence=%s",
+                    entry["actor_id"], _discovery_confidence(runs),
+                )
                 yield _sse({
                     "step": "discovery",
                     "actor_id": entry["actor_id"],
@@ -285,16 +323,23 @@ async def extract_endpoint(
             plan_key = _plan_cache_key(url, prompt)
             cached_plan_json = None if refresh else _schema_cache.get_plan(plan_key)
             if cached_plan_json is not None:
+                logger.info("Plan cache hit: key=%s — skipping Haiku planner", plan_key)
+                cache_events.append("plan_cache_hit")
                 plan = json.loads(cached_plan_json)
                 planner_cost = 0.0
                 yield _sse({"step": "plan_cache", "status": "hit"})
             else:
+                logger.info("Plan cache miss: key=%s — calling Haiku planner", plan_key)
                 tracker = _UsageTrackingClient(
                     anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
                 )
                 plan = plan_extraction(url, prompt or "", max_items, candidates, tracker)
                 planner_cost = _token_cost(tracker.input_tokens, tracker.output_tokens)
                 _schema_cache.put_plan(plan_key, json.dumps(plan))
+                logger.info(
+                    "Planner result: actor_id=%s reasoning=%r planner_cost=$%.6f",
+                    plan.get("actor_id"), (plan.get("reasoning") or "")[:100], planner_cost,
+                )
 
             yield _sse({
                 "step": "planning",
@@ -306,6 +351,14 @@ async def extract_endpoint(
         fetcher_label = "apify" if planned_path else _FETCHER_LABELS.get(
             profile.site_group, "scrapling_static"
         )
+        if planned_path and plan:
+            # Log input KEYS only — never the values (URLs/handles stay out of logs).
+            logger.info(
+                "Invoking actor: actor_id=%s input_keys=%s fetcher=%s",
+                plan.get("actor_id"), list((plan.get("actor_input") or {}).keys()), fetcher_label,
+            )
+        else:
+            logger.info("Fetching via %s: url=%s", fetcher_label, url)
         yield _sse({"step": "fetching", "status": "active", "fetcher": fetcher_label})
 
         fetch_result = await route_fetch(
@@ -353,6 +406,7 @@ async def extract_endpoint(
                 return
 
             if extraction_result.schema_cache_hit:
+                cache_events.append("schema_cache_hit")
                 yield _sse({"step": "schema_cache", "status": "hit"})
 
             yield _sse({"step": "extracting", "status": "done"})
@@ -421,6 +475,12 @@ async def extract_endpoint(
             "model_used": model_used,
         }
         _schema_cache.put_cached_result(cache_key, json.dumps(_done))
+        logger.info(
+            "Done: url=%s total_rows=%d total_columns=%d cost_usd=%.6f "
+            "(planner=%.6f apify=%.6f) cache_events=%s",
+            url, len(items), len(columns), cost_usd, planner_cost, apify_cost,
+            cache_events or ["none"],
+        )
         yield _sse(_done)
 
     return StreamingResponse(stream(), media_type="text/event-stream")

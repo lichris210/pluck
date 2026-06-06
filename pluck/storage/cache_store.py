@@ -5,12 +5,15 @@ Path is derived from __file__ at import time — Windows-compatible absolute pat
 """
 
 import json
+import logging
 import os
 import sqlite3
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from pluck.url_keys import results_key
+
+logger = logging.getLogger(__name__)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))          # pluck/storage/
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(_HERE))     # project root
@@ -249,6 +252,7 @@ class SchemaCacheStore:
             (cache_key,),
         ).fetchone()
         if row is None:
+            logger.debug("get_plan MISS (absent): key=%s", cache_key)
             return None
 
         created_at = datetime.fromisoformat(row["created_at"])
@@ -261,8 +265,10 @@ class SchemaCacheStore:
 
         age_seconds = (now - created_at).total_seconds()
         if age_seconds >= PLAN_CACHE_TTL_SECONDS:
+            logger.debug("get_plan MISS (expired): key=%s", cache_key)
             return None
 
+        logger.debug("get_plan HIT: key=%s", cache_key)
         self._conn.execute(
             """
             UPDATE plan_cache
@@ -277,6 +283,7 @@ class SchemaCacheStore:
 
     def put_plan(self, cache_key: str, plan_json: str) -> None:
         """Insert or replace the cached plan for *cache_key*, resetting use_count."""
+        logger.debug("put_plan WRITE: key=%s", cache_key)
         now = self._now_str()
         self._conn.execute(
             """
@@ -344,6 +351,10 @@ class SchemaCacheStore:
                 [(now_str, domain_pattern, aid) for aid in fresh_ids],
             )
             self._conn.commit()
+        logger.debug(
+            "get_discovered %s: domain_pattern=%s fresh=%d",
+            "HIT" if out else "MISS", domain_pattern, len(out),
+        )
         return out
 
     def put_discovered(self, domain_pattern: str, entry: dict) -> None:
@@ -354,6 +365,9 @@ class SchemaCacheStore:
         """
         now = self._now_str()
         actor_id = entry.get("actor_id")
+        logger.debug(
+            "put_discovered WRITE: domain_pattern=%s actor_id=%s", domain_pattern, actor_id
+        )
         self._conn.execute(
             """
             INSERT INTO discovered_actors

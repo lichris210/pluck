@@ -233,6 +233,10 @@ def _validate_plan(
 
     entry = find_entry(plan.get("actor_id"), candidates)
     if entry is None:
+        logger.info(
+            "Plan validation: actor_id=%r not in candidates -> reject (fallback)",
+            plan.get("actor_id"),
+        )
         return None
 
     actor_input = plan.get("actor_input")
@@ -250,6 +254,7 @@ def _validate_plan(
             return None
 
     # Decision 2: clamp any item count above the ceiling back down.
+    clamped = False
     for key, value in actor_input.items():
         if (
             key in _LIMIT_KEYS
@@ -261,6 +266,7 @@ def _validate_plan(
                 "Clamping %s from %d to ceiling %d", key, value, max_items
             )
             actor_input[key] = max_items
+            clamped = True
 
     all_columns = entry.get("all_columns", [])
     shape = plan.get("output_shape") or {}
@@ -274,6 +280,11 @@ def _validate_plan(
     shape["columns"] = valid
     plan["output_shape"] = shape
 
+    logger.info(
+        "Plan validation passed: actor_id=%s in_candidates=True valid_columns=%d "
+        "dropped_columns=%d clamped=%s",
+        entry.get("actor_id"), len(valid), len(extras), clamped,
+    )
     return plan
 
 

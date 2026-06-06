@@ -100,6 +100,10 @@ def _request(client, model, url, prompt, candidates, strict):
         if getattr(block, "type", None) == "text":
             text += block.text
     parsed = repair_and_parse(text)
+    logger.info(
+        "Discovery ranking call: candidates_in=%d strict=%s json_parsed=%s",
+        len(candidates), strict, bool(parsed),
+    )
     return parsed[0] if parsed else None
 
 
@@ -171,13 +175,22 @@ async def capture_output_schema(
             run_input=run_input, max_items=1, timeout_secs=timeout_secs
         )
         if not run or run.get("status") in ("FAILED", "ABORTED", "ABORTING"):
+            logger.info(
+                "Schema capture: actor_id=%s run_id=%s status=%s -> rejected",
+                actor_id, (run or {}).get("id"), (run or {}).get("status"),
+            )
             return []
         page = await client.dataset(run["defaultDatasetId"]).list_items(limit=1)
         items = page.items
         # The probe must return a row that looks like real content — a thin row
         # (e.g. an error stub or a near-empty object) means the actor/input guess
         # was wrong, so treat it as a failed capture (Issue 1).
-        if items and isinstance(items[0], dict) and _looks_like_content(items[0]):
+        content_ok = bool(items) and isinstance(items[0], dict) and _looks_like_content(items[0])
+        logger.info(
+            "Schema capture: actor_id=%s run_id=%s items=%d looks_like_content=%s",
+            actor_id, run.get("id"), len(items), content_ok,
+        )
+        if content_ok:
             return list(items[0].keys())
         return []
     except Exception as exc:
