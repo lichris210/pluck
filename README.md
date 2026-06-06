@@ -95,6 +95,7 @@ The Dockerfile builds the React frontend and serves it as static files from the 
 | `ANTHROPIC_API_KEY` | Yes | Claude API access for extraction |
 | `APIFY_TOKEN` | No | Enables fortress site support |
 | `PLUCK_PASSWORD` | No | Web UI password (default: `pluck`) |
+| `USE_PLANNER` | No | Intent-aware Apify planner + discovery fall-through (default: `true`). Set to `false` to disable. |
 
 ## How it works
 
@@ -258,8 +259,16 @@ APIFY_TOKEN=apify_api_...         # Optional. Enables fortress site support.
 PLUCK_MAX_CHUNK_CHARS=3000        # Max size for fallback chunking (edge case).
 PLUCK_MAX_CONCURRENT=5            # Max parallel Claude API calls.
 PLUCK_DEFAULT_FORMAT=table        # Output format: table, json, csv.
-USE_PLANNER=false                 # Route registry hosts through the intent-aware Apify planner.
+USE_PLANNER=true                  # Intent-aware Apify planner + discovery. Default true.
 ```
+
+**`USE_PLANNER` (default `true`).** When on, requests to a registry host (Instagram,
+LinkedIn, Amazon, plus any tier-2 discovered host) are routed through the intent-aware
+planner: one Haiku call reads the prompt and picks the best Apify actor and output
+columns. For hosts not in the registry, the discovery fall-through searches the Apify
+Store, ranks candidates with Haiku, captures the real output schema, and caches the
+winner. Set `USE_PLANNER=false` to disable both and use only the legacy
+classify → fetch → extract path.
 
 If `APIFY_TOKEN` is missing, Pluck still works for Groups 1–5. Group 6–7 URLs return an error message suggesting the user set the token.
 

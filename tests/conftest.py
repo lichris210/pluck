@@ -3,6 +3,18 @@ from unittest.mock import MagicMock
 import pytest
 
 
+# USE_PLANNER now defaults to true (loaded from .env), which makes /api/extract take
+# the planner path and, for unknown hosts, the Phase 3 discovery fall-through — which
+# hits the live Apify Store + Haiku. Unit tests that exercise the legacy
+# classify→fetch→extract path don't mock that, so pin the flag off by default. Tests
+# that need the planner/discovery path opt in by setting USE_PLANNER=true themselves
+# (via patch.dict / monkeypatch in the test body or their own fixture), which runs
+# after this autouse fixture and therefore wins.
+@pytest.fixture(autouse=True)
+def _planner_off_by_default(monkeypatch):
+    monkeypatch.setenv("USE_PLANNER", "false")
+
+
 def _make_response(text: str, input_tokens: int = 100, output_tokens: int = 50):
     """Build a fake `messages.create` response with one text content block."""
     block = MagicMock()

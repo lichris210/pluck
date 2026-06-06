@@ -63,6 +63,10 @@ export function extractSSE(url, schema, callbacks, maxItems = 100, prompt = null
     } else if (payload.status === 'error') {
       evtSource.close();
       callbacks.onError?.(payload.error || 'Unknown error');
+    } else if (payload.step === 'discovery') {
+      // Discovery is backend telemetry: the event is still parsed and received,
+      // but kept out of the visible UI. Log it for DevTools debugging only.
+      console.info('[pluck] discovery event', payload);
     } else {
       callbacks.onStep?.(payload);
     }
