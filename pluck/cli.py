@@ -230,7 +230,29 @@ def _item_count(result) -> int:
     return 0
 
 
+def _clear_plan_cache_main(argv: list[str]) -> None:
+    """`pluck clear-plan-cache` — bulk-clear cached planner plans, print the count."""
+    parser = argparse.ArgumentParser(
+        prog="pluck clear-plan-cache",
+        description="Clear all cached planner plans from pluck_cache.db.",
+    )
+    parser.parse_args(argv)  # no options; surfaces -h/--help
+
+    from pluck.storage.cache_store import SchemaCacheStore
+
+    store = SchemaCacheStore()
+    cleared = store.clear_plan_cache()
+    store.close()
+    print(f"Cleared {cleared} cached plan(s).")
+
+
 def main() -> None:
+    # Non-disruptive subcommand intercept: keep the flat url-positional parser
+    # (and _build_parser, used by tests) untouched for every other invocation.
+    if len(sys.argv) > 1 and sys.argv[1] == "clear-plan-cache":
+        _clear_plan_cache_main(sys.argv[2:])
+        return
+
     parser = _build_parser()
     args = parser.parse_args()
     try:

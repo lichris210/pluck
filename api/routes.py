@@ -64,6 +64,13 @@ async def classify_endpoint(body: ClassifyRequest, _token: str = Depends(require
     }
 
 
+@router.post("/api/admin/plan-cache/clear")
+async def clear_plan_cache_endpoint(_token: str = Depends(require_auth)):
+    """Bulk-clear the planner plan cache. Returns the number of rows removed."""
+    cleared = _schema_cache.clear_plan_cache()
+    return {"cleared": cleared}
+
+
 _PLANNER_TRUTHY = {"1", "true", "yes", "on"}
 
 
