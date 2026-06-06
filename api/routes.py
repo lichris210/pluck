@@ -84,6 +84,21 @@ def _planned_cache_key(url: str, prompt: str | None) -> str:
     return f"{url}{sep}_pluck_phash={digest}"
 
 
+def _plan_cache_key(url: str, prompt: str | None) -> str:
+    """Plan-cache key for the planned path: normalised host plus a prompt hash.
+
+    Host normalisation mirrors the registry loader (lowercase netloc, strip a
+    leading ``www.``) so the same site reuses one plan regardless of www. The
+    prompt hash reuses ``_planned_cache_key``'s sha256[:16] digest because the
+    plan is shaped from the prompt.
+    """
+    host = urlparse(url).netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    phash = hashlib.sha256((prompt or "").encode("utf-8")).hexdigest()[:16]
+    return f"{host}|{phash}"
+
+
 def _sse(payload: dict) -> str:
     return "data: " + json.dumps(payload) + "\n\n"
 
@@ -176,11 +191,23 @@ async def extract_endpoint(
         planner_cost = 0.0
         if planned_path:
             yield _sse({"step": "planning", "status": "active"})
-            tracker = _UsageTrackingClient(
-                anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-            )
-            plan = plan_extraction(url, prompt or "", max_items, candidates, tracker)
-            planner_cost = _token_cost(tracker.input_tokens, tracker.output_tokens)
+
+            # Plan cache: a (host, prompt_hash) hit skips the Haiku call entirely
+            # (no tokens billed). refresh=true bypasses the read but still writes.
+            plan_key = _plan_cache_key(url, prompt)
+            cached_plan_json = None if refresh else _schema_cache.get_plan(plan_key)
+            if cached_plan_json is not None:
+                plan = json.loads(cached_plan_json)
+                planner_cost = 0.0
+                yield _sse({"step": "plan_cache", "status": "hit"})
+            else:
+                tracker = _UsageTrackingClient(
+                    anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+                )
+                plan = plan_extraction(url, prompt or "", max_items, candidates, tracker)
+                planner_cost = _token_cost(tracker.input_tokens, tracker.output_tokens)
+                _schema_cache.put_plan(plan_key, json.dumps(plan))
+
             yield _sse({
                 "step": "planning",
                 "status": "done",
