@@ -1,6 +1,26 @@
+import os
 from unittest.mock import MagicMock
 
 import pytest
+
+# api/auth.py reads PLUCK_PASSWORD and derives the session token at MODULE IMPORT
+# time, and test modules import api.main during collection — before any fixture
+# runs. So a fixture can't isolate it; pin it here instead. conftest is imported
+# before the test modules, and api.main's load_dotenv() never overrides an env var
+# that is already set, so this wins over both a user .env and the ambient shell.
+os.environ["PLUCK_PASSWORD"] = "pluck"
+
+
+# The API keys are read lazily (per request / per call), so a fixture suffices.
+# Pin them to the dummy values tests already use so a user .env with real keys
+# can't leak into unit tests via api.main's load_dotenv(). Tests that need the
+# vars ABSENT (e.g. the router no-token tests) clear os.environ themselves inside
+# the test body, which runs after this fixture and therefore wins.
+@pytest.fixture(autouse=True)
+def _test_env_defaults(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("APIFY_TOKEN", "test-token")
+    monkeypatch.setenv("PLUCK_PASSWORD", "pluck")
 
 
 # USE_PLANNER now defaults to true (loaded from .env), which makes /api/extract take
