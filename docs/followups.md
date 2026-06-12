@@ -63,17 +63,3 @@ then fell back to legacy as designed.
 Fix idea: feed capture-probe failure messages back into a single retry of the
 discovery call ("the actor rejected this input with: <error>; fix the template"),
 or down-rank an actor after a failed probe and try the next candidate.
-
-## 6. Legacy fallback for unknown auth-gated domains always fails (pageFunction)
-
-When discovery falls back to legacy for a domain not in `_ACTOR_MAP`
-(`pluck/fetchers/apify_handler.py`), `resolve_actor` returns the generic
-`apify/web-scraper` and `_build_actor_input` sends input with **no `pageFunction`**,
-so every such run fails with `Field input.pageFunction is required`. Observed live on
-the Indeed smoke: discovery's graceful fallback landed here and the request ended in
-error. Pre-existing legacy behavior (out of scope for the discovery filter change —
-"do not change the legacy fetcher").
-
-Fix idea: give the generic fallback a trivial generic `pageFunction` (e.g. return
-`document.body.innerText` / structured DOM dump), or skip Apify entirely for unknown
-domains and use the non-Apify fetch path.
