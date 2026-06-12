@@ -4,7 +4,7 @@ Routes fortress/auth-gated URLs to Apify actors and returns a FetchResult.
 Actor routing:
   1. Path-pattern match within a known domain (e.g. /jobs/ on linkedin.com)
   2. Domain _default actor
-  3. Generic web-scraper fallback for unknown domains
+  3. Generic website-content-crawler fallback for unknown domains
 """
 
 import logging
@@ -48,7 +48,10 @@ _ACTOR_MAP: dict[str, dict[str, str]] = {
     },
 }
 
-_GENERIC_ACTOR = "apify/web-scraper"
+# apify/web-scraper is unusable here: it requires a user-written pageFunction
+# (JavaScript), so every fallback run failed with "Field input.pageFunction is
+# required". website-content-crawler crawls with default rules instead.
+_GENERIC_ACTOR = "apify/website-content-crawler"
 
 
 def _run_cost_usd(run: dict) -> float | None:
@@ -109,8 +112,14 @@ def _build_actor_input(url: str, actor_id: str, max_items: int) -> dict:
         parts = urlparse(url).path.strip("/").split("/")
         search = parts[-1].replace("-", " ") if parts and parts[-1] else ""
         return {"search": search, "maxItems": max_items}
-    # Generic web-scraper fallback
-    return {"startUrls": [{"url": url}], "maxPagesPerCrawl": 5}
+    # Generic website-content-crawler fallback. Required fields per its live
+    # schema: startUrls (object array) and proxyConfiguration. No pageFunction.
+    return {
+        "startUrls": [{"url": url}],
+        "maxCrawlPages": max_items,
+        "crawlerType": "playwright:chrome",
+        "proxyConfiguration": {"useApifyProxy": True},
+    }
 
 
 async def _run_actor(

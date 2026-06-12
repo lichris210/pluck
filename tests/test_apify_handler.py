@@ -6,6 +6,7 @@ import pytest
 
 from pluck.fetchers.apify_handler import (
     _GENERIC_ACTOR,
+    _build_actor_input,
     fetch_via_apify,
     fetch_via_apify_plan,
     resolve_actor,
@@ -53,6 +54,28 @@ def test_resolve_actor_stockx():
 
 def test_resolve_actor_unknown_domain_returns_generic():
     assert resolve_actor("https://www.nytimes.com/section/tech") == _GENERIC_ACTOR
+
+
+# The generic fallback was switched from apify/web-scraper to
+# apify/website-content-crawler: web-scraper requires a user-written
+# pageFunction (JavaScript) that Pluck cannot supply, so auth-gated/fortress
+# URLs on unknown domains always failed with "Field input.pageFunction is
+# required". website-content-crawler crawls with default rules instead.
+
+def test_unknown_domain_fallback_is_content_crawler_not_web_scraper():
+    actor = resolve_actor("https://www.indeed.com/jobs?q=data+analyst")
+    assert actor == "apify/website-content-crawler"
+    assert actor != "apify/web-scraper"
+
+
+def test_generic_fallback_input_has_start_urls_and_no_pagefunction():
+    url = "https://www.indeed.com/jobs?q=data+analyst"
+    run_input = _build_actor_input(url, _GENERIC_ACTOR, 10)
+    assert run_input["startUrls"] == [{"url": url}]  # object-array form
+    assert "pageFunction" not in run_input
+    assert run_input["maxCrawlPages"] == 10
+    # Required by the actor's live schema alongside startUrls.
+    assert run_input["proxyConfiguration"] == {"useApifyProxy": True}
 
 
 def test_resolve_actor_strips_www_prefix():
