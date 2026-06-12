@@ -30,7 +30,7 @@ DEFAULT_MODEL = "claude-haiku-4-5"
 _MAX_TOKENS = 1024
 
 # Bump when discover_actor's logic changes in a way that invalidates cached entries.
-DISCOVERY_LOGIC_VERSION = 3
+DISCOVERY_LOGIC_VERSION = 4
 
 DISCOVERY_SYSTEM = (
     "You are an actor-discovery planner for Pluck.ai. You are given a URL, the "
@@ -212,6 +212,36 @@ async def _fetch_schemas_parallel(actor_ids: list[str], token: str | None) -> di
     return out
 
 
+# ── user-code filter ──────────────────────────────────────────────────────────
+
+_USER_CODE_EDITORS = {"javascript", "code"}
+_USER_CODE_FIELDS = {"pageFunction", "pageFunctionString"}
+
+
+def _user_code_field(schema: dict) -> tuple[str, str | None] | None:
+    """The first REQUIRED field that demands user-written code, or None.
+
+    A field demands user code when its editor is javascript/code or its name is
+    pageFunction/pageFunctionString. Optional code fields don't disqualify.
+    """
+    properties = (schema or {}).get("properties") or {}
+    for name in (schema or {}).get("required") or []:
+        spec = properties.get(name) or {}
+        editor = spec.get("editor") if isinstance(spec, dict) else None
+        if editor in _USER_CODE_EDITORS or name in _USER_CODE_FIELDS:
+            return name, editor
+    return None
+
+
+def _requires_user_code(schema: dict) -> bool:
+    """True when the actor needs human-written extraction code (e.g. pageFunction).
+
+    Generic scrapers (apify/web-scraper, apify/cheerio-scraper, ...) require a
+    pageFunction that Pluck cannot template; they must never be selected.
+    """
+    return _user_code_field(schema) is not None
+
+
 # ── single-pass Haiku discovery ───────────────────────────────────────────────
 
 def _discovery_payload(candidates: list[dict], schemas: dict[str, dict]) -> list[dict]:
@@ -376,6 +406,29 @@ async def discover_actor(
             "Discovery: all candidate schema fetches failed for %s; abandoning", url
         )
         return None
+
+    # Drop candidates whose schema requires user-written code (pageFunction etc.).
+    # Candidates whose schema fetch failed are kept — the capture probe vets them.
+    usable = []
+    for c in top3:
+        aid = c.get("actor_id")
+        hit = _user_code_field(schemas[aid]) if aid in schemas else None
+        if hit:
+            field, editor = hit
+            logger.info(
+                "Filtered candidate requires user code: actor_id=%s required_field=%s editor=%s",
+                aid, field, editor,
+            )
+            schemas.pop(aid, None)
+            continue
+        usable.append(c)
+    if not usable:
+        logger.warning(
+            "Discovery: all candidates for %s require user-written code; "
+            "cannot proceed, falling back to legacy", url
+        )
+        return None
+    top3 = usable
 
     raw = _request_single(client, model, url, prompt, _discovery_payload(top3, schemas))
     if not isinstance(raw, dict):

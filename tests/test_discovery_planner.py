@@ -11,6 +11,7 @@ from pluck.registry.discovery_planner import (
     DISCOVERY_SYSTEM,
     _fetch_schemas_parallel,
     _normalize_input_template,
+    _requires_user_code,
     _simplify_schema,
     apply_captured_schema,
     capture_output_schema,
@@ -341,6 +342,88 @@ def test_normalize_logs_transformations(caplog):
     with caplog.at_level(logging.INFO, logger="pluck.registry.discovery_planner"):
         _normalize_input_template({"startUrls": ["x"]}, schema)
     assert any("Normalized input field startUrls" in r.message for r in caplog.records)
+
+
+# ── user-code filter: generic scrapers requiring a pageFunction ───────────────
+
+PAGEFUNCTION_SCHEMA = {
+    "required": ["startUrls", "pageFunction"],
+    "properties": {
+        "startUrls": {"type": "array", "editor": "requestListSources"},
+        "pageFunction": {"type": "string", "editor": "javascript"},
+    },
+}
+
+
+def test_filter_excludes_pagefunction_actor():
+    assert _requires_user_code(PAGEFUNCTION_SCHEMA) is True
+
+
+def test_filter_allows_normal_actor():
+    assert _requires_user_code(INSTA_SCHEMA) is False
+
+
+def test_filter_allows_optional_javascript_field():
+    # A JS-editor field that is NOT required doesn't disqualify the actor.
+    schema = {
+        "required": ["startUrls"],
+        "properties": {
+            "startUrls": {"type": "array", "editor": "requestListSources"},
+            "extendOutputFunction": {"type": "string", "editor": "javascript"},
+        },
+    }
+    assert _requires_user_code(schema) is False
+
+
+@pytest.mark.asyncio
+async def test_discover_returns_none_when_all_candidates_filtered(mock_anthropic_client, caplog):
+    cands = [
+        {"actor_id": "apify/web-scraper", "title": "Web Scraper", "readmeSummary": "generic"},
+        {"actor_id": "apify/cheerio-scraper", "title": "Cheerio", "readmeSummary": "generic"},
+        {"actor_id": "apify/puppeteer-scraper", "title": "Puppeteer", "readmeSummary": "generic"},
+    ]
+    schemas = {c["actor_id"]: PAGEFUNCTION_SCHEMA for c in cands}
+    with _schemas_patch(schemas):
+        with caplog.at_level(logging.INFO, logger="pluck.registry.discovery_planner"):
+            entry = await discover_actor(URL, "p", cands, mock_anthropic_client, apify_token="t")
+
+    assert entry is None
+    mock_anthropic_client.messages.create.assert_not_called()
+    assert any(
+        "Filtered candidate requires user code" in r.getMessage() for r in caplog.records
+    )
+    assert any(
+        r.levelno == logging.WARNING and "user-written code" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_discover_skips_filtered_picks_next(mock_anthropic_client):
+    cands = [
+        {"actor_id": "apify/cheerio-scraper", "title": "Cheerio", "readmeSummary": "generic"},
+        {"actor_id": "apify/insta", "title": "Instagram Scraper", "readmeSummary": "posts"},
+        {"actor_id": "other/thing", "title": "Other", "readmeSummary": "unrelated"},
+    ]
+    schemas = {
+        "apify/cheerio-scraper": PAGEFUNCTION_SCHEMA,
+        "apify/insta": INSTA_SCHEMA,
+        "other/thing": INSTA_SCHEMA,
+    }
+    _set_response(mock_anthropic_client, {
+        "actor_id": "apify/insta",
+        "rationale": "x",
+        "input_template": {"directUrls": ["{url}"], "resultsLimit": "{max_items}"},
+        "limit_field": "resultsLimit",
+    })
+    with _schemas_patch(schemas):
+        entry = await discover_actor(URL, "p", cands, mock_anthropic_client, apify_token="t")
+
+    assert entry is not None
+    assert entry["actor_id"] == "apify/insta"
+    # The filtered generic scraper never reaches the ranking call.
+    user_msg = mock_anthropic_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "apify/cheerio-scraper" not in user_msg
 
 
 # ── Issue 2: ranking guidance in the discovery system prompt ──────────────────
