@@ -2,6 +2,10 @@
 
 Paste a URL, get back a structured data table. Pluck is a personal web-scraping tool for sites that don't offer data export — job boards, product listings, news aggregators, social profiles. You give it a page and (optionally) a plain-English prompt like "get job listings"; it figures out how to fetch the page, extracts the data, and returns rows and columns you can view in a terminal, a web UI, or save as JSON/CSV. One user, one machine, no accounts.
 
+![Pluck demo](pluck_demo.gif)
+
+[Full demo (10 min)](https://www.youtube.com/watch?v=8B1pEO9PNWQ)
+
 ## Architecture
 
 A request flows through five stages:
