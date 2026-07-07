@@ -4,8 +4,6 @@ Paste a URL, get back a structured data table. Pluck is a personal web-scraping 
 
 ![Pluck demo](pluck_demo.gif)
 
-[Full demo (10 min)](https://www.youtube.com/watch?v=8B1pEO9PNWQ)
-
 ## Architecture
 
 A request flows through five stages:
